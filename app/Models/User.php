@@ -45,4 +45,9 @@ class User extends Authenticatable
             'password' => 'hashed',
         ];
     }
+
+    //relacion con el modelo Cliente
+    public function cliente(){
+        return $this->hasOne(Cliente::class); //el usuario solo puede tener un cliente relacionado
+    }
 }
