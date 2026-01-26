@@ -6,6 +6,7 @@ use App\Data\Response\AuthResponseData;
 use App\Data\User\AccessUserData;
 use App\Data\User\RegisterUserData;
 use App\Data\User\UpdateUserData;
+use App\Enum\User\UserRole;
 use App\Enum\User\UserType;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Hash;
@@ -16,13 +17,16 @@ class TokenAuthService
      * Create a new class instance.
      */
     public function __construct(
-        private readonly UserService $userService
+        private readonly UserService $userService,
+        private readonly PermissionService $permissionService
     )
     {}
 
     public function register(RegisterUserData $data, UserType $type):AuthResponseData
     {
         $user =  $this->userService->create($data, $type);
+        $this->permissionService->setRole($user, UserRole::CUSTOMER);
+        
         $token = $this->createTokenForUser($user);
 
         return new AuthResponseData(
