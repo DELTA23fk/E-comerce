@@ -23,8 +23,8 @@ return new class extends Migration
             $table->string('ciudad');
             $table->string('estado');
             $table->string('codigo_postal');
-            $table->integer('numero_exterior')->nullable();
-            $table->integer('numero_interior')->nullable();
+            $table->string('numero_exterior')->nullable();
+            $table->string('numero_interior')->nullable();
             //otros
             $table->string('referencias')->nullable();
             $table->string('razon_social')->nullable();
