@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\Api\V1\Auth\AuthController as ApiAuthController;
+use App\Http\Controllers\Api\V1\Client\ClientController;
 use App\Http\Controllers\Spa\Auth\AuthController as SpaAuthController;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
@@ -36,8 +37,14 @@ Route::prefix('v1')->group(function () {
             Route::put('/auth/profile/update', [SpaAuthController::class, 'updateProfile'])->middleware(['permission:edit profile'])->name('spa.auth.profile.update');
         });
 
-        //GENERAL ROUTES FOR AUTHENTICATED USERS HERE --------------------------
+        Route::middleware('role:customer')->group(function(){
+            //GENERAL ROUTES FOR AUTHENTICATED USERS HERE --------------------------
+            Route::post('/user/client/register',[ClientController::class,'registerClientByAuthUser'])->name('user.client.register');
+            Route::get('/user/client/my',[ClientController::class,'getClientAuth'])->name('user.client.my');
+            Route::put('/user/client/update/my',[ClientController::class,'update'])->name('user.client.update.my');
+    
+        });
+
     });
-    //--------------------------------------
 });
 
