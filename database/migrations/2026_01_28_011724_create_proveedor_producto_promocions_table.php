@@ -11,10 +11,11 @@ return new class extends Migration
      */
     public function up(): void
     {
-        Schema::create('proveedor_producto_promocions', function (Blueprint $table) {
+        Schema::create('proveedor_producto_promociones', function (Blueprint $table) {
             $table->id();
             $table->decimal('total_descuento',15,2)->nullable()->unsigned();
             $table->string('moneda_descuento',10)->nullable();
+            $table->string('descuento_precio_moneda')->nullable();
             $table->decimal('precio_con_descuento',15,2)->nullable()->unsigned();
             $table->string('clave_promocion')->nullable();
             $table->text('descripcion_promocion')->nullable();
@@ -22,6 +23,7 @@ return new class extends Migration
             $table->integer('disponible_en_promocion')->nullable();
             $table->decimal('precio_oferta',15,2)->nullable()->unsigned();
             $table->decimal('precio_regular',15,2)->nullable()->unsigned();
+            $table->boolean('es_oferta')->default(false);
             $table->foreignId('proveedor_producto_id')->constrained('proveedor_productos')->onDelete('restrict')->onUpdate('cascade');
             $table->softDeletes();
             $table->timestamps();
@@ -33,6 +35,6 @@ return new class extends Migration
      */
     public function down(): void
     {
-        Schema::dropIfExists('proveedor_producto_promocions');
+        Schema::dropIfExists('proveedor_producto_promociones');
     }
 };

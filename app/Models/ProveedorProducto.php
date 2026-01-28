@@ -19,6 +19,7 @@ class ProveedorProducto extends Model
         'moneda',
         'garantia',
         'ultima_actualizacion',
+        'en_oferta',
         'proveedor_id',
         'producto_id'
     ];
@@ -34,7 +35,8 @@ class ProveedorProducto extends Model
             'garantia' => 'string',
             'ultima_actualizacion' => 'datetime:d-m-Y H:i:s',
             'proveedor_id' => 'integer',
-            'producto_id' => 'integer'
+            'producto_id' => 'integer',
+            'en_oferta' => 'boolean'
         ];
     }
 

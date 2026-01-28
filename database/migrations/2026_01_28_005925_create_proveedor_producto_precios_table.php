@@ -13,8 +13,9 @@ return new class extends Migration
     {
         Schema::create('proveedor_producto_precios', function (Blueprint $table) {
             $table->id();
+            $table->foreignId('proveedor_producto_id')->constrained('proveedor_productos')->onDelete('restrict')->onUpdate('cascade');
             $table->decimal('precio_actual',15,2)->unsigned();
-            $table->decimal('precio_anterior',15,2)->unsigned();
+            $table->decimal('precio_anterior',15,2)->nullable()->unsigned();
             $table->dateTime('ultima_actualizacion');
             $table->softDeletes();
             $table->timestamps();
