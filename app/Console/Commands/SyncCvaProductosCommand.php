@@ -47,7 +47,7 @@ class SyncCvaProductosCommand extends Command
             $startTime = microtime(true);
             
             try {
-                $paginationInfo = $syncService->syncCVA($providerIdDb, $filters, $currentPage);
+                $paginationInfo = $syncService->initialSyncCVA($providerIdDb, $filters, $currentPage);
                 
                 $duration = round(microtime(true) - $startTime, 2);
                 $this->info("✅ Página {$currentPage} procesada en {$duration}s");
@@ -55,7 +55,7 @@ class SyncCvaProductosCommand extends Command
                 $totalProcessed++;
 
                 if ($paginationInfo) {
-                    $totalPages = $paginationInfo['total'];
+                    $totalPages = $paginationInfo['total_paginas'];
                     $totalProductos += $paginationInfo['productos_procesados'] ?? 0;
                     
                     // Mostrar progreso

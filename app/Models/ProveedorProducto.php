@@ -14,7 +14,7 @@ class ProveedorProducto extends Model
     protected $fillable = [
         'proveedor_producto_id',
         'codigo_proveedor',
-        'stock_total',
+        'stock',
         'stock_cd',
         'moneda',
         'garantia',
@@ -29,7 +29,7 @@ class ProveedorProducto extends Model
         return [
             'proveedor_producto_id' => 'string',
             'codigo_proveedor' => 'string',
-            'stock_total' => 'integer',
+            'stock' => 'integer',
             'stock_cd' => 'integer',
             'moneda' => 'string',
             'garantia' => 'string',
@@ -39,6 +39,12 @@ class ProveedorProducto extends Model
             'en_oferta' => 'boolean'
         ];
     }
+
+    protected $hidden = [
+        'created_at',
+        'updated_at',
+        'deleted_at'
+    ];
 
      public function proveedor()
     {

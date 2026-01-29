@@ -2,24 +2,92 @@
 
 namespace App\Factories;
 
+use App\Data\Cva\ArticuloData;
 use App\Data\Producto\ProductoData;
 use InvalidArgumentException;
 
 class ProductoFactory
 {
-     /**
-     * Centraliza la creación para que el controlador no sepa de lógica
+    /**
+     * Centraliza la creación desde diferentes proveedores
+     * 
+     * @param string $proveedor Nombre del proveedor
+     * @param mixed $data Objeto tipado del proveedor (ArticuloData, ExelData, etc)
+     * @return ProductoData DTO unificado para el sistema
      */
-    public static function make(string $proveedor, array $data): ProductoData
+    public static function make(string $proveedor, mixed $data): ProductoData
     {
         return match($proveedor) {
             'cva'  => self::fromCVA($data),
             'exel' => self::fromExel($data),
-
             default => throw new InvalidArgumentException("Proveedor no soportado: {$proveedor}"),
         };
     }
     
+    /**
+     * Convierte ArticuloData (CVA) a ProductoData unificado
+     */
+    public static function fromCVA(ArticuloData $articulo): ProductoData
+    {
+        // Procesar imágenes
+        $images = [];
+        if (!empty($articulo->imagen)) {
+            $images[] = $articulo->imagen;
+        }
+        if (!empty($articulo->imagenes)) {
+            $images = array_merge($images, $articulo->imagenes);
+        }
+        $images = self::sanitizeImages($images);
+
+        // Verificar si hay promociones (DataCollection o null)
+        $hasPromotion = $articulo->promociones !== null && $articulo->promociones->count() > 0;
+        
+        // Obtener primera promoción si existe
+        $promo = $hasPromotion ? $articulo->promociones->first() : null;
+
+        return new ProductoData(
+            nombre: self::sanitizeString($articulo->descripcion),
+            descripcion: self::sanitizeString($articulo->descripcion ?? 'Sin descripción'),
+            descripcionTecnica: 'Sin descripcion tecnica', // CVA no tiene este campo
+            codigoFabricante: self::sanitizeString($articulo->codigoFabricante),
+            codigoBarras: null, // CVA no tiene código de barras
+            upc: self::sanitizeString($articulo->upc),
+            categoriaNombre: self::sanitizeString($articulo->principal ?? 'General'),
+            subcategoriaNombre: null, // CVA no tiene subcategoría
+            familiaNombre: null, // CVA no tiene familia
+            grupoNombre: self::sanitizeString($articulo->grupo ?? 'General'),
+            marcaNombre: self::sanitizeString($articulo->marca ?? 'General'),
+            proveedorProductoId: (string) $articulo->id,
+            proveedorProductoCodigo: self::sanitizeString($articulo->clave),
+            moneda: self::normalizeCurrency($articulo->moneda ?? 'Pesos'),
+            stock: $articulo->disponible,
+            stockCD: $articulo->disponibleCD,
+            enOferta: $hasPromotion,
+            garantia: self::sanitizeString($articulo->garantia),
+            precioActual: $articulo->precio,
+            precioAnterior: null,
+            imagenes: $images,
+            
+            // Datos de promociones desde PromocionCvaData
+            descuentoTotal: $promo?->precio_descuento,
+            descuentoMoneda: $promo ? self::normalizeCurrency($promo->moneda_descuento) : null,
+            descuentoPrecio: $promo?->precio_descuento,
+            descuentoPrecioMoneda: $promo ? self::normalizeCurrency($promo->moneda_descuento) : null,
+            clavePromocion: $promo?->clave_promocion,
+            promocionDescripcion: $promo?->descripcion_promocion,
+            promocionExpiracion: $promo?->promocion_vencimiento,
+            disponiblesEnPromocion: $promo?->disponible_en_promocion,
+            ofertaPrecio: null,
+            precioRegular: null,
+            esOferta: $hasPromotion
+        );
+    }
+
+    /**
+     * Convierte datos de Exel a ProductoData unificado
+     * 
+     * @param array $item Mantener como array hasta que tengas ExelData tipado
+     */
     public static function fromExel(array $item): ProductoData
     {
         return new ProductoData(
@@ -41,7 +109,7 @@ class ProductoFactory
             stockCD: null,
             enOferta: self::toBool($item['oferta'] ?? false),
             garantia: self::sanitizeString($item['garantia'] ?? null),
-            precioActual: self::toFloat($item['precio'] ?? 0),
+            precioActual: (string) self::toFloat($item['precio'] ?? 0),
             precioAnterior: null,
             imagenes: self::sanitizeImages($item['imagenes'] ?? []),
             descuentoTotal: null,
@@ -52,65 +120,17 @@ class ProductoFactory
             promocionDescripcion: null,
             promocionExpiracion: null,
             disponiblesEnPromocion: null,
-            ofertaPrecio: self::toBool($item['oferta'] ?? false) ? self::toFloat($item['precio_oferta'] ?? null) : null,
-            precioRegular: self::toFloat($item['precio_sin_oferta'] ?? null),
+            ofertaPrecio: self::toBool($item['oferta'] ?? false) 
+                ? (string) self::toFloat($item['precio_oferta'] ?? null) 
+                : null,
+            precioRegular: (string) self::toFloat($item['precio_sin_oferta'] ?? null),
             esOferta: self::toBool($item['oferta'] ?? false)
         );
     }
 
-    public static function fromCVA(array $item): ProductoData
-    {
-        // Procesar imágenes
-        $images = [];
-        if (!empty($item['imagen'])) {
-            $images[] = $item['imagen'];
-        }
-        if (isset($item['imagenes']) && is_array($item['imagenes'])) {
-            $images = array_merge($images, $item['imagenes']);
-        }
-        $images = self::sanitizeImages($images);
-
-        // Verificar si hay promociones
-        $hasPromotion = isset($item['promociones']) && is_array($item['promociones']);
-        $promos = $hasPromotion ? $item['promociones'] : [];
-
-        return new ProductoData(
-            nombre: self::sanitizeString($item['descripcion']),
-            descripcion: self::sanitizeString($item['ficha_comercial'] ?? 'Sin descripción'),
-            descripcionTecnica: self::sanitizeString($item['ficha_tecnica'] ?? 'Sin descripcion tecnica'),
-            codigoFabricante: self::sanitizeString($item['codigo_fabricante'] ?? null),
-            codigoBarras: null,
-            upc: self::sanitizeString($item['upc'] ?? null),
-            categoriaNombre: self::sanitizeString($item['principal'] ?? 'General'),
-            subcategoriaNombre: null,
-            familiaNombre: null,
-            grupoNombre: self::sanitizeString($item['grupo'] ?? 'General'),
-            marcaNombre: self::sanitizeString($item['marca'] ?? 'General'),
-            proveedorProductoId: (string) ($item['id'] ?? ''),
-            proveedorProductoCodigo: self::sanitizeString($item['clave'] ?? ''),
-            moneda: self::normalizeCurrency($item['moneda'] ?? 'Pesos'),
-            stock: self::toInt($item['disponible'] ?? 0),
-            stockCD: self::toInt($item['disponibleCD'] ?? 0),
-            enOferta: $hasPromotion,
-            garantia: self::sanitizeString($item['garantia'] ?? null),
-            precioActual: self::sanitizeString($item['precio'] ?? '00.00'),
-            precioAnterior: null,
-            imagenes: $images,
-            
-            // Datos de promociones con conversión segura
-            descuentoTotal: $hasPromotion ? self::sanitizeString($promos['total_descuento'] ?? null) : null,
-            descuentoMoneda: $hasPromotion ? self::normalizeCurrency($promos['moneda_descuento'] ?? null) : null,
-            descuentoPrecio: $hasPromotion ? self::sanitizeString($promos['precio_descuento'] ?? null) : null,
-            descuentoPrecioMoneda: $hasPromotion ? self::normalizeCurrency($promos['moneda_precio_descuento'] ?? null) : null,
-            clavePromocion: $hasPromotion && isset($promos['clave_promocion']) ? (string) $promos['clave_promocion'] : null,
-            promocionDescripcion: $hasPromotion ? self::sanitizeString($promos['descripcion_promocion'] ?? null) : null,
-            promocionExpiracion: $hasPromotion ? $promos['promocion_vencimiento'] : null ,
-            disponiblesEnPromocion: $hasPromotion ? self::toInt($promos['disponible_en_promocion'] ?? null) : null,
-            ofertaPrecio: null,
-            precioRegular: null,
-            esOferta: $hasPromotion
-        );
-    }
+    // =========================================================================
+    // MÉTODOS DE SANITIZACIÓN Y CONVERSIÓN
+    // =========================================================================
 
     /**
      * Convierte valores a float de forma segura

@@ -29,7 +29,7 @@ class ProveedorProductoPromocion extends Model
     protected function casts():array
     {
         return [
-            'total_descuento' => 'decimal:2',
+            'total_descuento' => 'string',
             'moneda_descuento' => 'string',
             'precio_con_descuento' => 'decimal:2',
             'clave_promocion' => 'string',
@@ -44,6 +44,12 @@ class ProveedorProductoPromocion extends Model
 
         ];
     }
+
+    protected $hidden = [
+        'created_at',
+        'updated_at',
+        'deleted_at'
+    ];
 
     public function proveedorProducto()
     {

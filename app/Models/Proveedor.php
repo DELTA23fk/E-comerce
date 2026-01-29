@@ -16,6 +16,12 @@ class Proveedor extends Model
         'nombre',
         'activo'
     ];
+
+    protected $hidden = [
+        'created_at',
+        'updated_at',
+        'deleted_at'
+    ];
     
     protected function casts(): array
     {
@@ -24,6 +30,10 @@ class Proveedor extends Model
             'nombre' => 'string',
             'activo' => 'boolean'
         ];
+    }
+
+    public function productoProveedor(){
+        return $this->hasMany(ProveedorProducto::class);
     }
     
     

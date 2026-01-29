@@ -60,4 +60,11 @@ class Producto extends Model
     {
         return $this->hasMany(ProductoImagen::class);
     }
+    public function proveedorProductos()
+    {
+        return $this->hasMany(ProveedorProducto::class);
+    }
+    public function marca(){
+        return $this->belongsTo(Marca::class);
+    }
 }

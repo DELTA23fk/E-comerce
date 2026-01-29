@@ -13,7 +13,7 @@ return new class extends Migration
     {
         Schema::create('proveedor_producto_promociones', function (Blueprint $table) {
             $table->id();
-            $table->decimal('total_descuento',15,2)->nullable()->unsigned();
+            $table->string('total_descuento')->nullable();
             $table->string('moneda_descuento',10)->nullable();
             $table->string('descuento_precio_moneda')->nullable();
             $table->decimal('precio_con_descuento',15,2)->nullable()->unsigned();
@@ -27,6 +27,9 @@ return new class extends Migration
             $table->foreignId('proveedor_producto_id')->constrained('proveedor_productos')->onDelete('restrict')->onUpdate('cascade');
             $table->softDeletes();
             $table->timestamps();
+
+            $table->unique(['proveedor_producto_id','clave_promocion'], 
+                'unique_promo_por_clave');
         });
     }
 
