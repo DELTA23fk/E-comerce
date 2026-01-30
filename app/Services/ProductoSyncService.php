@@ -73,6 +73,10 @@ class ProductoSyncService
         return $this->apiCva->getSingleProductByClave($filters);
         
     }
+    public function getProductsGeneral(array $filters = [], int $page = 1)
+    {
+        return $this->apiCva->getProductsGeneral($filters, $page);
+    }
 
 
 
@@ -279,7 +283,7 @@ class ProductoSyncService
     /**
      * Actualiza precios en batch, solo si cambiaron
      */
-    protected function updatePricesBatch(Collection $articles, int $providerIdDb): array
+    public function updatePricesBatch(array $articles, int $providerIdDb): array
     {
         $stats = ['total' => 0, 'updated' => 0, 'unchanged' => 0, 'errors' => 0];
 
@@ -297,23 +301,25 @@ class ProductoSyncService
                         continue;
                     }
 
-                    // Verificar si cambió el precio
-                    $currentPrice = DB::table('proveedor_producto_precios')
+                    // Obtener el registro de precio actual para comparar y luego actualizar
+                    $currentPriceRecord = DB::table('proveedor_producto_precios')
                         ->where('proveedor_producto_id', $providerProduct->id)
-                        ->latest('created_at')
-                        ->first();
+                        ->first(); // O ->latest('created_at')->first() si hay varios
 
                     $newPrice = $dto->precioActual;
 
-                    if (!$currentPrice || $currentPrice->precio_actual != $newPrice) {
-                        // Insertar nuevo registro de precio
-                        DB::table('proveedor_producto_precios')->insert([
-                            'proveedor_producto_id' => $providerProduct->id,
-                            'precio_actual' => $newPrice,
-                            'precio_anterior' => $currentPrice->precio_actual ?? null,
-                            'ultima_actualizacion' => now(),
-                            'created_at' => now(),
-                        ]);
+                    if (!$currentPriceRecord || $currentPriceRecord->precio_actual != $newPrice) {
+                        
+                        // CAMBIO: De insert a update
+                        DB::table('proveedor_producto_precios')
+                            ->where('proveedor_producto_id', $providerProduct->id)
+                            ->update([
+                                'precio_anterior' => $currentPriceRecord->precio_actual ?? null,
+                                'precio_actual' => $newPrice,
+                                'ultima_actualizacion' => now(),
+                                'updated_at' => now(), // Generalmente se usa updated_at en lugar de created_at para updates
+                            ]);
+
                         $stats['updated']++;
                     } else {
                         $stats['unchanged']++;
@@ -362,7 +368,7 @@ class ProductoSyncService
     /**
      * Actualiza stock en batch, solo si cambió
      */
-    protected function updateStockBatch(Collection $articles, int $providerIdDb): array
+    public function updateStockBatch(array $articles, int $providerIdDb): array
     {
         $stats = ['total' => 0, 'updated' => 0, 'unchanged' => 0, 'errors' => 0];
 
@@ -446,9 +452,9 @@ class ProductoSyncService
     /**
      * Actualiza promociones en batch con detección de cambios
      */
-    protected function updatePromotionsBatch(Collection $articles, int $providerIdDb): array
+    public function updatePromotionsBatch(array $articles, int $providerIdDb): array
     {
-        $stats = ['total' => 0, 'created' => 0, 'unchanged' => 0, 'expired' => 0, 'errors' => 0];
+        $stats = ['total' => 0, 'created' => 0, 'updated_stock' => 0, 'unchanged' => 0, 'expired' => 0, 'errors' => 0];
 
         DB::transaction(function () use ($articles, $providerIdDb, &$stats) {
             foreach ($articles as $article) {
@@ -457,44 +463,58 @@ class ProductoSyncService
                     $stats['total']++;
 
                     $providerProduct = $this->findProviderProductByDto($dto, $providerIdDb);
-                    
                     if (!$providerProduct) {
                         $stats['errors']++;
                         continue;
                     }
 
-                    // Obtener última promoción
                     $lastPromo = DB::table('proveedor_producto_promociones')
                         ->where('proveedor_producto_id', $providerProduct->id)
-                        ->latest('created_at')
+                        ->latest('id') // Usamos ID para asegurar que es el registro más reciente
                         ->first();
 
-                    // Si hay promoción activa en el DTO
-                    if ($dto->esOferta || $dto->descuentoTotal !== null) {
-                        $newPromo = $this->buildPromotionData($dto, $providerProduct->id);
+                    if ($dto->esOferta || ($dto->descuentoTotal !== null && $dto->descuentoTotal > 0)) {
+                        $newPromoData = $this->buildPromotionData($dto, $providerProduct->id);
 
-                        // Insertar solo si cambió
-                        if (!$lastPromo || $this->hasPromotionChanged($lastPromo, $newPromo)) {
-                            DB::table('proveedor_producto_promociones')->insert($newPromo);
-                            $stats['created']++;
+                        // 1. Validar si la promoción base cambió (Precio, Descuento, Expiración)
+                        if (!$lastPromo || $this->hasPromotionChanged($lastPromo, $newPromoData)) {
+                            // Es una promoción nueva o distinta -> INSERT
+                            DB::table('proveedor_producto_promociones')->insert($newPromoData);
                             
-                            // Actualizar flag en provider_product
-                            ProveedorProducto::where('id', $providerProduct->id)
+                            DB::table('proveedor_productos')
+                                ->where('id', $providerProduct->id)
                                 ->update(['en_oferta' => true]);
-                        } else {
+                                
+                            $stats['created']++;
+                        } 
+                        // 2. Si es la misma promo, validar si cambió la cantidad disponible
+                        elseif ((string)$lastPromo->disponible_en_promocion !== (string)$newPromoData['disponible_en_promocion']) {
+                            // Misma promo pero cambió el stock disponible -> UPDATE
+                            DB::table('proveedor_producto_promociones')
+                                ->where('id', $lastPromo->id)
+                                ->update([
+                                    'disponible_en_promocion' => $newPromoData['disponible_en_promocion'],
+                                    'ultima_actualizacion' => now(), // Si tienes este campo
+                                    'updated_at' => now()
+                                ]);
+                                
+                            $stats['updated_stock']++;
+                        } 
+                        else {
                             $stats['unchanged']++;
                         }
                     } else {
-                        // No hay promoción activa, marcar como expirada
-                        if ($lastPromo && $providerProduct->en_oferta) {
-                            ProveedorProducto::where('id', $providerProduct->id)
+                        // No hay promo en DTO: si estaba marcado como oferta, limpiar flag
+                        if ($providerProduct->en_oferta) {
+                            DB::table('proveedor_productos')
+                                ->where('id', $providerProduct->id)
                                 ->update(['en_oferta' => false]);
                             $stats['expired']++;
                         }
                     }
 
                 } catch (\Exception $e) {
-                    Log::error("Error actualizando promoción", [
+                    Log::error("Error procesando promoción", [
                         'article' => $article['id'] ?? 'unknown',
                         'error' => $e->getMessage()
                     ]);
@@ -505,7 +525,6 @@ class ProductoSyncService
 
         return $stats;
     }
-
     /**
      * Actualiza promoción de un solo producto
      */
@@ -606,7 +625,7 @@ class ProductoSyncService
      */
     protected function getUniqueKey($dto): ?string
     {
-        return $dto->upc ?: ($dto->codigoBarras ?: ($dto->codigoFabricante ?: null));
+        return $dto->upc ?? $dto->codigoBarras?? null;
     }
 
     /**

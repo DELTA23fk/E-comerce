@@ -14,7 +14,7 @@ class ArticuloData extends Data
     public function __construct(
         public int $id,
         public string $clave,
-        public string $upc,
+        public ?string $upc,
         public string $codigoFabricante,
         public string $descripcion,
         public string $principal,

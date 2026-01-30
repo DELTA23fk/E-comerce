@@ -38,12 +38,10 @@ class CvaRepository
 
         $response = Http::withToken($this->getCvaToken())
             ->get($this->URLBASE . 'catalogo_clientes/lista_precios', $queryParams);
-
         if ($response->unauthorized()) {
             Cache::forget('cva_bearer_token');
             throw new \Exception("Token expirado. Intenta de nuevo.");
         }
-
         if ($response->failed()) {
             throw new \Exception("CVA API Error: " . $response->status());
         }
