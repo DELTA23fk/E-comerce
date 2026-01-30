@@ -1,0 +1,43 @@
+<?php
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    /**
+     * Run the migrations.
+     */
+    public function up(): void
+    {
+        Schema::create('proveedor_producto_promociones', function (Blueprint $table) {
+            $table->id();
+            $table->string('total_descuento')->nullable();
+            $table->string('moneda_descuento',10)->nullable();
+            $table->string('descuento_precio_moneda')->nullable();
+            $table->decimal('precio_con_descuento',15,2)->nullable()->unsigned();
+            $table->string('clave_promocion')->nullable();
+            $table->text('descripcion_promocion')->nullable();
+            $table->string('expiracion')->nullable();
+            $table->integer('disponible_en_promocion')->nullable();
+            $table->decimal('precio_oferta',15,2)->nullable()->unsigned();
+            $table->decimal('precio_regular',15,2)->nullable()->unsigned();
+            $table->boolean('es_oferta')->default(false);
+            $table->foreignId('proveedor_producto_id')->constrained('proveedor_productos')->onDelete('restrict')->onUpdate('cascade');
+            $table->softDeletes();
+            $table->timestamps();
+
+            $table->unique(['proveedor_producto_id','clave_promocion'], 
+                'unique_promo_por_clave');
+        });
+    }
+
+    /**
+     * Reverse the migrations.
+     */
+    public function down(): void
+    {
+        Schema::dropIfExists('proveedor_producto_promociones');
+    }
+};

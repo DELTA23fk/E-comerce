@@ -2,6 +2,12 @@
 
 use App\Http\Controllers\Api\V1\Auth\AuthController as ApiAuthController;
 use App\Http\Controllers\Api\V1\Client\ClientController;
+use App\Http\Controllers\Api\V1\Product\ProductCatalogController;
+use App\Http\Controllers\Api\V1\Product\ProductoController;
+use App\Http\Controllers\Api\V1\Product\ProductOfferController;
+use App\Http\Controllers\Api\V1\Product\ProductProviderController;
+use App\Http\Controllers\Api\V1\Product\ProductSearchController;
+use App\Http\Controllers\Api\V1\Product\ProductStockController;
 use App\Http\Controllers\Spa\Auth\AuthController as SpaAuthController;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
@@ -36,6 +42,7 @@ Route::prefix('v1')->group(function () {
 
             Route::put('/auth/profile/update', [SpaAuthController::class, 'updateProfile'])->middleware(['permission:edit profile'])->name('spa.auth.profile.update');
         });
+        //-------------------------------------------------
 
         Route::middleware('role:customer')->group(function(){
             //GENERAL ROUTES FOR AUTHENTICATED USERS HERE --------------------------
@@ -44,6 +51,145 @@ Route::prefix('v1')->group(function () {
             Route::put('/user/client/update/my',[ClientController::class,'update'])->name('user.client.update.my');
     
         });
+
+        Route::prefix('productos')->group(function(){
+            // Listado general con filtros básicos
+            Route::get('/', [ProductoController::class, 'index'])->name('productos');
+            
+            // Detalle de un producto
+            Route::get('/{id}', [ProductoController::class, 'show']);
+            
+            // Producto por código
+            Route::get('/codigo/{codigo}', [ProductoController::class, 'porCodigo']);
+            
+            // Producto por código de barras
+            Route::get('/barras/{codigoBarras}', [ProductoController::class, 'porCodigoBarras']);
+            
+            // Producto por UPC
+            Route::get('/upc/{upc}', [ProductoController::class, 'porUPC']);
+        });
+
+        Route::prefix('productos/busqueda')->group(function () {
+            // Búsqueda general
+            Route::get('/general', [ProductSearchController::class, 'busquedaGeneral']);
+            
+            // Búsqueda por texto (nombre, descripción)
+            Route::get('/texto', [ProductSearchController::class, 'porTexto']);
+            
+            // Búsqueda avanzada con múltiples criterios
+            Route::post('/avanzada', [ProductSearchController::class, 'busquedaAvanzada']);
+            
+            // Sugerencias/autocompletado
+            Route::get('/sugerencias', [ProductSearchController::class, 'sugerencias']);
+        });
+
+        Route::prefix('productos/catalogo')->group(function () {
+            // Por categoría
+            Route::get('/categoria/{categoriaId}', [ProductCatalogController::class, 'porCategoria']);
+            
+            // Por sub-categoría
+            Route::get('/sub-categoria/{subCategoriaId}', [ProductCatalogController::class, 'porSubCategoria']);
+            
+            // Por familia
+            Route::get('/familia/{familiaId}', [ProductCatalogController::class, 'porFamilia']);
+            
+            // Por grupo
+            Route::get('/grupo/{grupoId}', [ProductCatalogController::class, 'porGrupo']);
+            
+            // Por marca
+            Route::get('/marca/{marcaId}', [ProductCatalogController::class, 'porMarca']);
+            
+            // Productos relacionados
+            Route::get('/{id}/relacionados', [ProductCatalogController::class, 'productosRelacionados']);
+        });
+
+        Route::prefix('productos/proveedores')->group(function () {
+            // Productos de un proveedor específico
+            Route::get('/{proveedorId}', [ProductProviderController::class, 'porProveedor']);
+            
+            // Comparar precios entre proveedores
+            Route::get('/{productoId}/comparar-precios', [ProductProviderController::class, 'compararPrecios']);
+            
+            // Mejor precio disponible
+            Route::get('/{productoId}/mejor-precio', [ProductProviderController::class, 'mejorPrecio']);
+            
+            // Historial de precios
+            Route::get('/{productoId}/historial-precios', [ProductProviderController::class, 'historialPrecios']);
+            
+            // Proveedores por producto
+            Route::get('/{productoId}/listado', [ProductProviderController::class, 'proveedoresPorProducto']);
+        });
+
+        Route::prefix('productos/stock')->group(function () {
+            // Productos con stock disponible
+            Route::get('/disponibles', [ProductStockController::class, 'disponibles']);
+            
+            // Productos sin stock
+            Route::get('/agotados', [ProductStockController::class, 'agotados']);
+            
+            // Stock por producto
+            Route::get('/{productoId}', [ProductStockController::class, 'stockPorProducto']);
+            
+            // Stock bajo (próximos a agotarse)
+            Route::get('/bajo-stock', [ProductStockController::class, 'stockBajo']);
+            
+            // Verificar disponibilidad
+            Route::post('/verificar', [ProductStockController::class, 'verificarDisponibilidad']);
+        });
+
+        Route::prefix('productos/ofertas')->group(function () {
+            // Todos los productos en oferta
+            Route::get('/', [ProductOfferController::class, 'productosEnOferta']);
+            
+            // Ofertas por categoría
+            Route::get('/categoria/{categoriaId}', [ProductOfferController::class, 'ofertasPorCategoria']);
+            
+            // Promociones activas
+            Route::get('/promociones', [ProductOfferController::class, 'promocionesActivas']);
+            
+            // Descuentos mayores a X%
+            Route::get('/descuentos/{porcentaje}', [ProductOfferController::class, 'descuentosMayoresA']);
+            
+            // Ofertas del día
+            Route::get('/del-dia', [ProductOfferController::class, 'ofertasDelDia']);
+            
+            // Ofertas por vencer
+            Route::get('/por-vencer', [ProductOfferController::class, 'ofertasPorVencer']);
+        });
+
+        Route::prefix('productos/filtros')->group(function () {
+            // Por rango de precios
+            Route::get('/precio', [ProductoController::class, 'porRangoPrecio']);
+            
+            // Productos más recientes
+            Route::get('/recientes', [ProductoController::class, 'recientes']);
+            
+            // Productos más vendidos (si tienes esta data)
+            Route::get('/populares', [ProductoController::class, 'populares']);
+            
+            // Productos destacados
+            Route::get('/destacados', [ProductoController::class, 'destacados']);
+        });
+
+        Route::prefix('productos/{productoId}/imagenes')->group(function () {
+            // Todas las imágenes de un producto
+            Route::get('/', [ProductoController::class, 'imagenes']);
+            
+            // Imagen principal
+            Route::get('/principal', [ProductoController::class, 'imagenPrincipal']);
+        });
+
+        Route::prefix('productos/estadisticas')->group(function () {
+            // Resumen general
+            Route::get('/resumen', [ProductoController::class, 'resumenEstadisticas']);
+            
+            // Conteo por categoría
+            Route::get('/por-categoria', [ProductoController::class, 'conteoPorCategoria']);
+            
+            // Conteo por marca
+            Route::get('/por-marca', [ProductoController::class, 'conteoPorMarca']);
+        });
+
 
     });
 });
