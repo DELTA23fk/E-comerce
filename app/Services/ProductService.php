@@ -13,13 +13,19 @@ class ProductService
 {
     protected ProductFilterService $filterService;
     protected ProductRelationService $relationService;
+    protected ProductRealtimeUpdateService $realtimeUpdateService;
 
     public function __construct(
         ProductFilterService $filterService,
-        ProductRelationService $relationService
+        ProductRelationService $relationService,
+        ProductRealtimeUpdateService $realtimeUpdateService
+
     ) {
         $this->filterService = $filterService;
         $this->relationService = $relationService;
+        $this->realtimeUpdateService = $realtimeUpdateService;
+
+
     }
 
     private function productBaseBuilder():Builder
@@ -57,6 +63,17 @@ class ProductService
      */
     public function getProductoPorId(int $id, Request $request): ?Producto
     {
+         // Detectar si se están solicitando proveedores
+        $incluyeProveedores = $request->boolean('include_proveedores') || 
+                             $request->boolean('include_proveedor_detalle') ||
+                             $request->boolean('include_precios') ||
+                             $request->boolean('include_promociones');
+
+        //ACTUALIZAR AUTOMÁTICAMENTE si se solicitan proveedores
+        if ($incluyeProveedores) {
+            $this->realtimeUpdateService->actualizarTodosLosProveedores($id);
+        }
+
         $query = $this->productBaseBuilder();
 
         $relations = $this->relationService->buildRelations($request);
@@ -72,6 +89,11 @@ class ProductService
      */
     public function buscarPorCodigoFabricante(string $codigo, Request $request): ?Collection
     {
+        $incluyeProveedores = $request->boolean('include_proveedores') || 
+                                 $request->boolean('include_proveedor_detalle') ||
+                                 $request->boolean('include_precios') ||
+                                 $request->boolean('include_promociones');
+
         $query = $this->productBaseBuilder();
 
         $query->where('codigo_fabricante', $codigo);
@@ -80,8 +102,24 @@ class ProductService
         if (!empty($relations)) {
             $query->with($relations);
         }
+        $productos = $query->get();
+        
+        if ($productos->isNotEmpty() && $incluyeProveedores) {
 
-        return $query->get();
+
+            foreach($productos as $item){
+                $this->realtimeUpdateService->actualizarTodosLosProveedores($item->id);
+                // Recargar el producto con las relaciones actualizadas
+                $item->refresh();
+                if (!empty($relations)) {
+                    $item->load($relations);
+                }
+            }
+            
+        }
+        
+        return $productos;
+
     }
 
     /**
@@ -98,7 +136,24 @@ class ProductService
             $query->with($relations);
         }
 
-        return $query->first();
+        $producto = $query->first();
+
+        if ($producto) {
+            $incluyeProveedores = $request->boolean('include_proveedores') || 
+                                 $request->boolean('include_proveedor_detalle') ||
+                                 $request->boolean('include_precios') ||
+                                 $request->boolean('include_promociones');
+
+            if ($incluyeProveedores) {
+                $this->realtimeUpdateService->actualizarTodosLosProveedores($producto->id);
+                $producto->refresh();
+                if (!empty($relations)) {
+                    $producto->load($relations);
+                }
+            }
+        }
+
+        return $producto;
     }
 
     /**
@@ -115,7 +170,25 @@ class ProductService
             $query->with($relations);
         }
 
-        return $query->first();
+         $producto = $query->first();
+
+        // ✅ ACTUALIZAR AUTOMÁTICAMENTE si el producto existe y se solicitan proveedores
+        if ($producto) {
+            $incluyeProveedores = $request->boolean('include_proveedores') || 
+                                 $request->boolean('include_proveedor_detalle') ||
+                                 $request->boolean('include_precios') ||
+                                 $request->boolean('include_promociones');
+
+            if ($incluyeProveedores) {
+                $this->realtimeUpdateService->actualizarTodosLosProveedores($producto->id);
+                $producto->refresh();
+                if (!empty($relations)) {
+                    $producto->load($relations);
+                }
+            }
+        }
+
+        return $producto;
     }
 
     /**

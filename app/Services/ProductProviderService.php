@@ -11,10 +11,14 @@ use Illuminate\Support\Collection;
 class ProductProviderService
 {
     protected ProductRelationService $relationService;
+    protected ProductRealtimeUpdateService $realtimeUpdateService;
 
-    public function __construct(ProductRelationService $relationService)
+    public function __construct(ProductRelationService $relationService, ProductRealtimeUpdateService $realtimeUpdateService
+)
     {
         $this->relationService = $relationService;
+        $this->realtimeUpdateService = $realtimeUpdateService;
+
     }
 
     /**
@@ -55,6 +59,8 @@ class ProductProviderService
      */
     public function compararPrecios(int $productoId): Collection
     {
+        $this->realtimeUpdateService->actualizarTodosLosProveedores($productoId);
+
         $producto = Producto::with([
             'proveedorProductos.proveedor',
             'proveedorProductos.pricios' => function ($q) {
@@ -88,6 +94,8 @@ class ProductProviderService
      */
     public function obtenerMejorPrecio(int $productoId): ?array
     {
+        $this->realtimeUpdateService->actualizarTodosLosProveedores($productoId);
+
         $comparacion = $this->compararPrecios($productoId);
         
         // Filtrar solo proveedores con stock
@@ -147,6 +155,8 @@ class ProductProviderService
      */
     public function obtenerProveedoresPorProducto(int $productoId): Collection
     {
+        $this->realtimeUpdateService->actualizarTodosLosProveedores($productoId);
+
         return ProveedorProducto::with(['proveedor', 'pricios' => function ($q) {
             $q->latest('ultima_actualizacion')->limit(1);
         }])

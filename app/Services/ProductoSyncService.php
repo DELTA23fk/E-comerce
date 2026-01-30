@@ -187,15 +187,14 @@ class ProductoSyncService
         $filters = ['id' => $articleId]; // o ['clave' => $articleId] según API
         $data = $this->apiCva->getSingleProductByClave($filters);
 
-        if ($data['articulos']->isEmpty()) {
+        if (!isset($data) || is_null($data)) {
             return [
                 'success' => false,
                 'error' => "Artículo {$articleId} no encontrado en CVA"
             ];
         }
 
-        $article = $data['articulos']->first();
-        $dto = ProductoFactory::fromCVA($article);
+        $dto = ProductoFactory::fromCVA($data);
 
         try {
             DB::transaction(function () use ($dto, $providerIdDb) {
@@ -215,7 +214,7 @@ class ProductoSyncService
                 $this->updateSinglePromotion($dto, $providerProduct->id);
                 
                 // 6. Actualizar imágenes
-                $this->updateProductImages($dto, $product->id);
+                //$this->updateProductImages($dto, $product->id);
             });
 
             return [
