@@ -29,4 +29,12 @@ enum UserType : int
             UserType::SELLER => ['list_products', 'view_sales'],
         };
     }
+
+    public static function toArray(): array
+    {
+        return array_map(fn($case) => [
+            'id'    => $case->value,
+            'label' => $case->label()
+        ], self::cases());
+    }
 }

@@ -2,30 +2,27 @@
 
 namespace App\Data\User;
 
-use App\Enum\User\UserType;
 use Spatie\LaravelData\Attributes\Validation\Confirmed;
 use Spatie\LaravelData\Attributes\Validation\Email;
-use Spatie\LaravelData\Attributes\Validation\Enum;
 use Spatie\LaravelData\Attributes\Validation\Max;
 use Spatie\LaravelData\Attributes\Validation\Password;
+use Spatie\LaravelData\Attributes\Validation\Sometimes;
 use Spatie\LaravelData\Attributes\Validation\Unique;
-use Spatie\LaravelData\Attributes\Computed;
 use Spatie\LaravelData\Data;
+use Spatie\LaravelData\Support\Validation\References\RouteParameterReference;
 
-class UserCustomData extends Data
+class UpdateCustomUserData extends Data
 {
     /**
      * Clase para registro de usuario con tipo personalizado
      */
     public function __construct(
-        #[Max(230)]
+        #[Sometimes,Max(230)]
         public string $nombre,
-        #[Email(),Max(255),Unique('users','email')]
+        #[Sometimes,Email(),Max(255),Unique('users','email',ignore:new RouteParameterReference('usuarioId'))]
         public string $correo,
-        #[Password(min: 8, letters: true, mixedCase: true, numbers: true, symbols: true, uncompromised: true, uncompromisedThreshold: 0), Confirmed]
+        #[Sometimes,Password(min: 8, letters: true, mixedCase: true, numbers: true, symbols: true, uncompromised: true, uncompromisedThreshold: 0), Confirmed]
         public string $password,
-        #[Enum(UserType::class)]
-        public UserType $rol,
         //password admin confirmation
         public string $adminPassword
         
@@ -50,5 +47,4 @@ class UserCustomData extends Data
             'rol.required' => 'El rol es requerido'
         ];
     }
-
 }
