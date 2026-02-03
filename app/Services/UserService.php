@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Data\User\RegisterUserData;
+use App\Data\User\UpdateCustomUserData;
 use App\Data\User\UpdateUserData;
 use App\Data\User\UserCustomData;
 use App\Data\User\UserData;
@@ -24,21 +25,21 @@ class UserService
         // Si es UserCustomData, usa su tipo
         // Si es RegisterUserData, usa el tipo pasado o CUSTOMER por defecto
         $userType = $data instanceof UserCustomData 
-            ? $data->type 
+            ? $data->rol 
             : ($type ?? UserType::CUSTOMER);
 
         return User::create([
-            'name' => $data->name,
-            'email' => $data->email,
+            'name' => $data->nombre ?? $data->name,
+            'email' => $data->correo ?? $data->email,
             'password' => $data->password,
             'tipo' => $userType->value,
         ]);
     }
-    public function update(User $user, UpdateUserData $data): User
+    public function update(User $user, UpdateUserData | UpdateCustomUserData $data): User
     {
         $dataFiltered = array_filter([
-            'name' => $data->name,
-            'email' => $data->email,
+            'name' => $data->name ?? $data->nombre,
+            'email' => $data->email ?? $data->correo,
             'password' => $data->password,
         ], fn($value) => $value !== null);
 

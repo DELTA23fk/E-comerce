@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\Api\V1\Admin\ManagerUserController;
 use App\Http\Controllers\Api\V1\Auth\AuthController as ApiAuthController;
 use App\Http\Controllers\Api\V1\Client\ClientController;
 use App\Http\Controllers\Api\V1\Product\ProductCatalogController;
@@ -190,6 +191,24 @@ Route::prefix('v1')->group(function () {
             Route::get('/por-marca', [ProductoController::class, 'conteoPorMarca']);
         });
 
+        //----------Admin
+        Route::middleware('role:admin')->prefix('admin')->name('admin.')->group(function(){
+            // Consulta de tipos de usuario
+            Route::get('tipos-usuario', [ManagerUserController::class, 'getTypesUser'])
+                ->name('tipos-usuario');
+            
+            // Gestión de usuarios
+            Route::post('usuarios', [ManagerUserController::class, 'registerUserCustom'])
+                ->name('usuarios.store');
+            Route::put('usuarios/{usuarioId}', [ManagerUserController::class, 'updateUser'])
+                ->name('usuarios.update');
+            
+            // Asignación de roles (recurso anidado)
+            Route::put('usuarios/{usuarioId}/rol', [ManagerUserController::class, 'setRole'])
+                ->name('usuarios.rol.update');
+            Route::delete('usuarios/{usuarioId}/rol', [ManagerUserController::class, 'removeRole'])
+                ->name('usuarios.rol.destroy');
+        });
 
     });
 });
