@@ -36,6 +36,7 @@ return [
     ],
     'cva' => [
         'api_url' => env('CVA_API_URL'),
+        'api_url_flete' => env('CVA_API_URL_FLETE'),
         'client_id' => env('CVA_CLIENT_ID'),
         'client_secret' => env('CVA_CLIENT_SECRET'),
     ],

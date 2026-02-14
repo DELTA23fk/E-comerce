@@ -1,5 +1,8 @@
 <?php
 
+use App\Exceptions\Cva\CvaApiException;
+use App\Exceptions\Cva\CvaStockException;
+use App\Exceptions\Cva\CvaTokenException;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
@@ -29,5 +32,50 @@ return Application::configure(basePath: dirname(__DIR__))
                 'error' => 'Unauthorized'
             ], 403);
         }
+        });
+        // Manejo de CvaTokenException
+        $exceptions->render(function (CvaTokenException $e, $request) {
+            if ($request->expectsJson()) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Error de autenticación con CVA. Intenta nuevamente.',
+                    'data' => null,
+                    'error_code' => 'CVA_TOKEN_ERROR'
+                ], 401);
+            }
+
+            return back()->withErrors([
+                'cva' => 'Error de autenticación con el proveedor.'
+            ]);
+        });
+
+        // Manejo de CvaApiException
+        $exceptions->render(function (CvaApiException $e, $request) {
+
+            if ($request->expectsJson()) {
+                return response()->json([
+                    'success' => false,
+                    'message' => $e->getMessage(),
+                    'data' => null,
+                    'error_code' => 'CVA_API_ERROR'
+                ], $e->getStatusCode() >= 500 ? 500 : 400);
+            }
+
+            return back()->withErrors([
+                'cva' => $e->getMessage()
+            ])->withInput();
+        });
+        $exceptions->render(function(CvaStockException $e, $request){
+            if($request->expectsJson()){
+                return response()->json([
+                    'success' => false,
+                    'message' => $e->getMessage(),
+                    'data' => null,
+                    'error_code' => 'CVA_STOCK_LOW'
+                ],404);
+            }
+            return back()->withErrors([
+                'cva' => $e->getMessage()
+            ])->withInput();
         });
     })->create();

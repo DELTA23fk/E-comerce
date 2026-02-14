@@ -2,30 +2,45 @@
 
 namespace App\Console\Commands;
 
-use App\Factories\ProductoFactory;
 use App\Services\ProductoSyncService;
 use Illuminate\Console\Command;
-use Illuminate\Support\Collection;
+use Spatie\LaravelData\DataCollection;
 
+/**
+ * Comando de Actualización de Productos CVA
+ * 
+ * Actualiza productos existentes con los últimos datos de CVA.
+ * Permite actualizaciones selectivas:
+ * - Solo precios (--type=prices)
+ * - Solo stock (--type=stock)
+ * - Solo promociones (--type=promotions)
+ * - Todo junto (--type=all)
+ * 
+ * Uso:
+ * php artisan update:cva-products --type=prices --all        # Actualizar precios de todas las páginas
+ * php artisan update:cva-products --type=stock --page=3      # Stock desde página 3
+ * php artisan update:cva-products --type=all                 # Todo con paginación interactiva
+ */
 class UpdateCvaProductosCommand extends Command
 {    
     protected $signature = 'update:cva-products 
                             {--type=all : Tipo de actualización (prices|stock|promotions|all)}
-                            {--upc=true} 
-                            {--promos=true} 
-                            {--MonedaPesos=true} 
-                            {--completos=1} 
-                            {--exist=2}
+                            {--upc=true : Incluir productos con UPC}
+                            {--promos=true : Incluir promociones}
+                            {--MonedaPesos=true : Solo productos en pesos mexicanos}
+                            {--completos=1 : Solo productos con datos completos}
+                            {--exist=2 : Nivel de existencia (1=con stock, 2=todos)}
                             {--page=1 : Página inicial}
                             {--all : Actualizar todas las páginas automáticamente}';
 
-    protected $description = 'Actualiza precios, stock y/o promociones de productos CVA con paginación';
+    protected $description = 'Actualiza precios, stock y/o promociones de productos CVA existentes';
 
     public function handle(ProductoSyncService $syncService)
     {
-        $providerIdDb = 1; // ID del proveedor CVA en tu DB
+        $proveedorIdBd = 1; // ID del proveedor CVA en base de datos
         
-        $filters = array_filter([
+        // Construir filtros
+        $filtros = array_filter([
             'upc' => $this->option('upc'),
             'exist' => $this->option('exist'),
             'completos' => $this->option('completos'),
@@ -33,70 +48,75 @@ class UpdateCvaProductosCommand extends Command
             'promos' => $this->option('promos')
         ]);
 
-        $updateType = strtolower($this->option('type'));
-        $startPage = (int) $this->option('page');
-        $syncAll = $this->option('all');
+        $tipoActualizacion = strtolower($this->option('type'));
+        $paginaInicial = (int) $this->option('page');
+        $actualizarTodo = $this->option('all');
 
         // Validar tipo de actualización
-        $validTypes = ['prices', 'stock', 'promotions', 'all'];
-        if (!in_array($updateType, $validTypes)) {
-            $this->error("❌ Tipo de actualización inválido. Use: " . implode(', ', $validTypes));
+        $tiposValidos = ['prices', 'stock', 'promotions', 'all'];
+        if (!in_array($tipoActualizacion, $tiposValidos)) {
+            $this->error("❌ Tipo de actualización inválido. Use: " . implode(', ', $tiposValidos));
             return Command::FAILURE;
         }
 
-        $this->displayHeader($updateType, $filters);
+        // Mostrar encabezado
+        $this->mostrarEncabezado($tipoActualizacion, $filtros);
 
-        $currentPage = $startPage;
-        $totalPages = null;
-        $globalStats = $this->initializeGlobalStats($updateType);
+        $paginaActual = $paginaInicial;
+        $totalPaginas = null;
+        $estadisticasGlobales = $this->inicializarEstadisticasGlobales($tipoActualizacion);
 
+        // Loop principal de actualización
         do {
-            $this->displayPageHeader($currentPage, $totalPages);
+            $this->mostrarEncabezadoPagina($paginaActual, $totalPaginas);
             
-            $startTime = microtime(true);
+            $tiempoInicio = microtime(true);
             
             try {
-                $productos = collect();
                 // Obtener datos de la API
-                $data = $syncService->getProductsGeneral($filters, $currentPage);
-
+                $respuesta = $syncService->obtenerProductosGenerales($filtros, $paginaActual);
                 
-                if ($data->articulos->count() === 0) {
+                if ($respuesta->articulos->count() === 0) {
                     $this->info("✅ No hay más productos para procesar");
                     break;
-                }          
+                }
                 
-                // Actualizar según el tipo seleccionado
-                $pageStats = $this->executeUpdate($syncService, $productos->all(), $providerIdDb, $updateType);
+                // Ejecutar actualización según el tipo
+                $estadisticasPagina = $this->ejecutarActualizacion(
+                    $syncService, 
+                    $respuesta->articulos, 
+                    $proveedorIdBd, 
+                    $tipoActualizacion
+                );
                 
                 // Acumular estadísticas
-                $this->mergeStats($globalStats, $pageStats);
+                $this->combinarEstadisticas($estadisticasGlobales, $estadisticasPagina);
                 
-                $duration = round(microtime(true) - $startTime, 2);
+                $duracion = round(microtime(true) - $tiempoInicio, 2);
                 
                 // Mostrar resultados de la página
-                $this->displayPageResults($currentPage, $pageStats, $duration);
+                $this->mostrarResultadosPagina($paginaActual, $estadisticasPagina, $duracion);
                 
                 // Actualizar información de paginación
-                if ($data->paginacion) {
-                    $totalPages = $data->paginacion->totalPaginas;
-                    $this->displayProgress($currentPage, $totalPages);
+                if ($respuesta->paginacion) {
+                    $totalPaginas = $respuesta->paginacion->totalPaginas;
+                    $this->mostrarProgreso($paginaActual, $totalPaginas);
                 }
                 
                 // Preguntar si continuar (solo si no es --all)
-                if (!$syncAll && $currentPage < $totalPages) {
-                    $nextPage = $currentPage + 1;
+                if (!$actualizarTodo && $paginaActual < $totalPaginas) {
+                    $siguientePagina = $paginaActual + 1;
                     
-                    if (!$this->confirm("¿Continuar con la página {$nextPage} de {$totalPages}?", true)) {
+                    if (!$this->confirm("¿Continuar con la página {$siguientePagina} de {$totalPaginas}?", true)) {
                         $this->warn("⏸️  Actualización pausada por el usuario.");
                         break;
                     }
                 }
                 
-                $currentPage++;
+                $paginaActual++;
                 
             } catch (\Exception $e) {
-                $this->error("❌ Error en página {$currentPage}: " . $e->getMessage());
+                $this->error("❌ Error en página {$paginaActual}: " . $e->getMessage());
                 $this->error($e->getTraceAsString());
                 
                 if ($this->confirm('¿Reintentar esta página?', true)) {
@@ -106,10 +126,10 @@ class UpdateCvaProductosCommand extends Command
                 break;
             }
             
-        } while ($currentPage <= $totalPages || ($syncAll && $data->articulos->count() > 0));
+        } while ($paginaActual <= $totalPaginas || ($actualizarTodo && $respuesta->articulos->count() > 0));
 
         // Mostrar resumen final
-        $this->displayFinalSummary($globalStats, $updateType);
+        $this->mostrarResumenFinal($estadisticasGlobales, $tipoActualizacion);
         
         return Command::SUCCESS;
     }
@@ -117,135 +137,139 @@ class UpdateCvaProductosCommand extends Command
     /**
      * Ejecuta la actualización según el tipo seleccionado
      */
-    protected function executeUpdate(
+    protected function ejecutarActualizacion(
         ProductoSyncService $syncService, 
-        $articles, 
-        int $providerIdDb, 
-        string $updateType
+        DataCollection $articulos, 
+        int $proveedorIdBd, 
+        string $tipoActualizacion
     ): array {
-        $stats = [];
-        
-        switch ($updateType) {
-            case 'prices':
-                $stats = $this->updatePricesForBatch($syncService, $articles, $providerIdDb);
-                break;
-                
-            case 'stock':
-                $stats = $this->updateStockForBatch($syncService, $articles, $providerIdDb);
-                break;
-                
-            case 'promotions':
-                $stats = $this->updatePromotionsForBatch($syncService, $articles, $providerIdDb);
-                break;
-                
-            case 'all':
-                $stats = $this->updateAllForBatch($syncService, $articles, $providerIdDb);
-                break;
-        }
-        
-        return $stats;
+        return match($tipoActualizacion) {
+            'prices' => $this->actualizarPrecios($syncService, $articulos, $proveedorIdBd),
+            'stock' => $this->actualizarStock($syncService, $articulos, $proveedorIdBd),
+            'promotions' => $this->actualizarPromociones($syncService, $articulos, $proveedorIdBd),
+            'all' => $this->actualizarTodo($syncService, $articulos, $proveedorIdBd),
+        };
     }
 
     /**
-     * Actualiza solo precios de un batch
+     * Actualiza solo precios
      */
-    protected function updatePricesForBatch(
+    protected function actualizarPrecios(
         ProductoSyncService $syncService, 
-        $articles, 
-        int $providerIdDb
+        DataCollection $articulos, 
+        int $proveedorIdBd
     ): array {
-        $this->info("💰 Actualizando precios...");
+        $this->line("💰 Actualizando precios...");
         
-        return $syncService->updatePricesBatch($articles, $providerIdDb);
+        return $syncService->actualizarPreciosBatch($articulos, $proveedorIdBd);
     }
 
     /**
-     * Actualiza solo stock de un batch
+     * Actualiza solo stock
      */
-    protected function updateStockForBatch(
+    protected function actualizarStock(
         ProductoSyncService $syncService, 
-        $articles, 
-        int $providerIdDb
+        DataCollection $articulos, 
+        int $proveedorIdBd
     ): array {
-        $this->info("📦 Actualizando stock...");
+        $this->line("📦 Actualizando stock...");
         
-        return $syncService->updateStockBatch($articles, $providerIdDb);
+        return $syncService->actualizarStockBatch($articulos, $proveedorIdBd);
     }
 
     /**
-     * Actualiza solo promociones de un batch
+     * Actualiza solo promociones
      */
-    protected function updatePromotionsForBatch(
+    protected function actualizarPromociones(
         ProductoSyncService $syncService, 
-        $articles, 
-        int $providerIdDb
+        DataCollection $articulos, 
+        int $proveedorIdBd
     ): array {
-        $this->info("🎁 Actualizando promociones...");
+        $this->line("🎁 Actualizando promociones...");
         
-        return $syncService->updatePromotionsBatch($articles, $providerIdDb);
+        return $syncService->actualizarPromocionesBatch($articulos, $proveedorIdBd);
     }
 
     /**
      * Actualiza todo (precios, stock, promociones)
      */
-    protected function updateAllForBatch(
+    protected function actualizarTodo(
         ProductoSyncService $syncService, 
-        $articles, 
-        int $providerIdDb
+        DataCollection $articulos, 
+        int $proveedorIdBd
     ): array {
-        $this->info("🔄 Actualizando precios, stock y promociones...");
+        $this->line("🔄 Actualizando precios, stock y promociones...");
         
-        $pricesStats = $syncService->updatePricesBatch($articles, $providerIdDb);
-        $stockStats = $syncService->updateStockBatch($articles, $providerIdDb);
-        $promosStats = $syncService->updatePromotionsBatch($articles, $providerIdDb);
+        $estadisticasPrecios = $syncService->actualizarPreciosBatch($articulos, $proveedorIdBd);
+        $estadisticasStock = $syncService->actualizarStockBatch($articulos, $proveedorIdBd);
+        $estadisticasPromociones = $syncService->actualizarPromocionesBatch($articulos, $proveedorIdBd);
         
         return [
-            'prices' => $pricesStats,
-            'stock' => $stockStats,
-            'promotions' => $promosStats,
+            'precios' => $estadisticasPrecios,
+            'stock' => $estadisticasStock,
+            'promociones' => $estadisticasPromociones,
         ];
     }
 
     /**
-     * Inicializa estadísticas globales
+     * Inicializa estadísticas globales según el tipo de actualización
      */
-    protected function initializeGlobalStats(string $updateType): array
+    protected function inicializarEstadisticasGlobales(string $tipoActualizacion): array
     {
-        $baseStats = ['total' => 0, 'updated' => 0, 'unchanged' => 0, 'errors' => 0];
+        $estadisticasBase = [
+            'total' => 0, 
+            'actualizados' => 0, 
+            'sin_cambios' => 0, 
+            'errores' => 0
+        ];
         
-        if ($updateType === 'all') {
+        if ($tipoActualizacion === 'all') {
             return [
-                'prices' => $baseStats,
-                'stock' => $baseStats,
-                'promotions' => ['total' => 0, 'created' => 0, 'unchanged' => 0, 'expired' => 0, 'errors' => 0],
+                'precios' => $estadisticasBase,
+                'stock' => $estadisticasBase,
+                'promociones' => [
+                    'total' => 0, 
+                    'creadas' => 0, 
+                    'stock_actualizado' => 0,
+                    'sin_cambios' => 0, 
+                    'expiradas' => 0, 
+                    'errores' => 0
+                ],
             ];
         }
         
-        if ($updateType === 'promotions') {
-            return ['total' => 0, 'created' => 0, 'unchanged' => 0, 'expired' => 0, 'errors' => 0];
+        if ($tipoActualizacion === 'promotions') {
+            return [
+                'total' => 0, 
+                'creadas' => 0, 
+                'stock_actualizado' => 0,
+                'sin_cambios' => 0, 
+                'expiradas' => 0, 
+                'errores' => 0
+            ];
         }
         
-        return $baseStats;
+        return $estadisticasBase;
     }
 
     /**
      * Combina estadísticas de página con globales
      */
-    protected function mergeStats(array &$globalStats, array $pageStats): void
+    protected function combinarEstadisticas(array &$estadisticasGlobales, array $estadisticasPagina): void
     {
-        if (isset($pageStats['prices'])) {
-            // Es una actualización completa (all)
-            foreach (['prices', 'stock', 'promotions'] as $type) {
-                if (isset($pageStats[$type])) {
-                    foreach ($pageStats[$type] as $key => $value) {
-                        $globalStats[$type][$key] = ($globalStats[$type][$key] ?? 0) + $value;
+        if (isset($estadisticasPagina['precios'])) {
+            // Actualización completa (all)
+            foreach (['precios', 'stock', 'promociones'] as $tipo) {
+                if (isset($estadisticasPagina[$tipo])) {
+                    foreach ($estadisticasPagina[$tipo] as $clave => $valor) {
+                        $estadisticasGlobales[$tipo][$clave] = ($estadisticasGlobales[$tipo][$clave] ?? 0) + $valor;
                     }
                 }
             }
         } else {
-            // Es una actualización simple
-            foreach ($pageStats as $key => $value) {
-                $globalStats[$key] = ($globalStats[$key] ?? 0) + $value;
+            // Actualización simple
+            foreach ($estadisticasPagina as $clave => $valor) {
+                $estadisticasGlobales[$clave] = ($estadisticasGlobales[$clave] ?? 0) + $valor;
             }
         }
     }
@@ -253,25 +277,29 @@ class UpdateCvaProductosCommand extends Command
     /**
      * Muestra encabezado del comando
      */
-    protected function displayHeader(string $updateType, array $filters): void
+    protected function mostrarEncabezado(string $tipoActualizacion, array $filtros): void
     {
         $this->newLine();
         $this->info("╔═══════════════════════════════════════════════════════════╗");
-        $this->info("║      ACTUALIZACIÓN DE PRODUCTOS CVA                       ║");
+        $this->info("║        ACTUALIZACIÓN DE PRODUCTOS CVA                     ║");
         $this->info("╚═══════════════════════════════════════════════════════════╝");
         $this->newLine();
         
-        $typeNames = [
+        $nombresActualizacion = [
             'prices' => '💰 Precios',
             'stock' => '📦 Stock',
             'promotions' => '🎁 Promociones',
-            'all' => '🔄 Todo (Precios, Stock y Promociones)',
+            'all' => '🔄 Completa (Precios, Stock y Promociones)',
         ];
         
-        $this->info("Tipo de actualización: " . ($typeNames[$updateType] ?? $updateType));
+        $this->info("Tipo de actualización: " . ($nombresActualizacion[$tipoActualizacion] ?? $tipoActualizacion));
         
-        if (!empty($filters)) {
-            $this->info("Filtros aplicados: " . json_encode($filters, JSON_PRETTY_PRINT));
+        if (!empty($filtros)) {
+            $this->newLine();
+            $this->info("📋 Filtros aplicados:");
+            foreach ($filtros as $clave => $valor) {
+                $this->line("  • {$clave}: {$valor}");
+            }
         }
         
         $this->newLine();
@@ -280,116 +308,120 @@ class UpdateCvaProductosCommand extends Command
     /**
      * Muestra encabezado de página
      */
-    protected function displayPageHeader(int $currentPage, ?int $totalPages): void
+    protected function mostrarEncabezadoPagina(int $paginaActual, ?int $totalPaginas): void
     {
-        $pageInfo = "📄 Procesando página {$currentPage}";
-        if ($totalPages) {
-            $pageInfo .= " de {$totalPages}";
+        $infoPagina = "📄 Procesando página {$paginaActual}";
+        if ($totalPaginas) {
+            $infoPagina .= " de {$totalPaginas}";
         }
         
         $this->info(str_repeat('─', 60));
-        $this->info($pageInfo);
+        $this->info($infoPagina);
         $this->info(str_repeat('─', 60));
     }
 
     /**
-     * Muestra resultados de la página
+     * Muestra resultados de la página procesada
      */
-    protected function displayPageResults(int $page, array $stats, float $duration): void
+    protected function mostrarResultadosPagina(int $pagina, array $estadisticas, float $duracion): void
     {
         $this->newLine();
-        $this->info("✅ Página {$page} completada en {$duration}s");
+        $this->info("✅ Página {$pagina} completada en {$duracion}s");
         
-        if (isset($stats['prices'])) {
+        if (isset($estadisticas['precios'])) {
             // Actualización completa
             $this->line("  💰 Precios:");
-            $this->displaySimpleStats($stats['prices'], '    ');
+            $this->mostrarEstadisticasSimples($estadisticas['precios'], '    ');
             
             $this->line("  📦 Stock:");
-            $this->displaySimpleStats($stats['stock'], '    ');
+            $this->mostrarEstadisticasSimples($estadisticas['stock'], '    ');
             
             $this->line("  🎁 Promociones:");
-            $this->displayPromotionStats($stats['promotions'], '    ');
-        } elseif (isset($stats['created'])) {
+            $this->mostrarEstadisticasPromociones($estadisticas['promociones'], '    ');
+        } elseif (isset($estadisticas['creadas'])) {
             // Solo promociones
-            $this->displayPromotionStats($stats);
+            $this->mostrarEstadisticasPromociones($estadisticas);
         } else {
             // Precios o stock
-            $this->displaySimpleStats($stats);
+            $this->mostrarEstadisticasSimples($estadisticas);
         }
         
         $this->newLine();
     }
 
     /**
-     * Muestra estadísticas simples
+     * Muestra estadísticas simples (precios o stock)
      */
-    protected function displaySimpleStats(array $stats, string $indent = '  '): void
+    protected function mostrarEstadisticasSimples(array $estadisticas, string $indentacion = '  '): void
     {
-        $this->line($indent . "Total procesados: {$stats['total']}");
-        $this->line($indent . "✓ Actualizados: {$stats['updated']}");
-        $this->line($indent . "○ Sin cambios: {$stats['unchanged']}");
+        $this->line($indentacion . "Total procesados: {$estadisticas['total']}");
+        $this->line($indentacion . "✓ Actualizados: {$estadisticas['actualizados']}");
+        $this->line($indentacion . "○ Sin cambios: {$estadisticas['sin_cambios']}");
         
-        if ($stats['errors'] > 0) {
-            $this->warn($indent . "✗ Errores: {$stats['errors']}");
+        if ($estadisticas['errores'] > 0) {
+            $this->warn($indentacion . "✗ Errores: {$estadisticas['errores']}");
         }
     }
 
     /**
      * Muestra estadísticas de promociones
      */
-    protected function displayPromotionStats(array $stats, string $indent = '  '): void
+    protected function mostrarEstadisticasPromociones(array $estadisticas, string $indentacion = '  '): void
     {
-        $this->line($indent . "Total procesados: {$stats['total']}");
-        $this->line($indent . "✓ Creadas/Actualizadas: {$stats['created']}");
-        $this->line($indent . "○ Sin cambios: {$stats['unchanged']}");
-        $this->line($indent . "⏱ Expiradas: {$stats['expired']}");
+        $this->line($indentacion . "Total procesados: {$estadisticas['total']}");
+        $this->line($indentacion . "✓ Creadas: {$estadisticas['creadas']}");
+        $this->line($indentacion . "↻ Stock actualizado: {$estadisticas['stock_actualizado']}");
+        $this->line($indentacion . "○ Sin cambios: {$estadisticas['sin_cambios']}");
+        $this->line($indentacion . "⏱ Expiradas: {$estadisticas['expiradas']}");
         
-        if ($stats['errors'] > 0) {
-            $this->warn($indent . "✗ Errores: {$stats['errors']}");
+        if ($estadisticas['errores'] > 0) {
+            $this->warn($indentacion . "✗ Errores: {$estadisticas['errores']}");
         }
     }
 
     /**
-     * Muestra progreso
+     * Muestra barra de progreso
      */
-    protected function displayProgress(int $current, int $total): void
+    protected function mostrarProgreso(int $actual, int $total): void
     {
-        $progress = round(($current / $total) * 100, 1);
-        $progressBar = str_repeat('█', (int)($progress / 2)) . str_repeat('░', 50 - (int)($progress / 2));
+        $porcentaje = round(($actual / $total) * 100, 1);
+        $barraLlena = (int)($porcentaje / 2);
+        $barraVacia = 50 - $barraLlena;
+        $barraProgreso = str_repeat('█', $barraLlena) . str_repeat('░', $barraVacia);
         
-        $this->line("📊 Progreso: [{$progressBar}] {$progress}%");
+        $this->line("📊 Progreso: [{$barraProgreso}] {$porcentaje}%");
     }
 
     /**
      * Muestra resumen final
      */
-    protected function displayFinalSummary(array $globalStats, string $updateType): void
+    protected function mostrarResumenFinal(array $estadisticasGlobales, string $tipoActualizacion): void
     {
         $this->newLine();
         $this->info("╔═══════════════════════════════════════════════════════════╗");
-        $this->info("║              RESUMEN FINAL DE ACTUALIZACIÓN               ║");
+        $this->info("║          RESUMEN FINAL DE ACTUALIZACIÓN                   ║");
         $this->info("╚═══════════════════════════════════════════════════════════╝");
         $this->newLine();
         
-        if ($updateType === 'all') {
+        if ($tipoActualizacion === 'all') {
             $this->info("💰 PRECIOS:");
-            $this->displaySimpleStats($globalStats['prices']);
+            $this->mostrarEstadisticasSimples($estadisticasGlobales['precios']);
             $this->newLine();
             
             $this->info("📦 STOCK:");
-            $this->displaySimpleStats($globalStats['stock']);
+            $this->mostrarEstadisticasSimples($estadisticasGlobales['stock']);
             $this->newLine();
             
             $this->info("🎁 PROMOCIONES:");
-            $this->displayPromotionStats($globalStats['promotions']);
-        } elseif ($updateType === 'promotions') {
-            $this->displayPromotionStats($globalStats);
+            $this->mostrarEstadisticasPromociones($estadisticasGlobales['promociones']);
+        } elseif ($tipoActualizacion === 'promotions') {
+            $this->mostrarEstadisticasPromociones($estadisticasGlobales);
         } else {
-            $this->displaySimpleStats($globalStats);
+            $this->mostrarEstadisticasSimples($estadisticasGlobales);
         }
         
         $this->newLine();
         $this->info("🎉 Actualización completada exitosamente");
+        $this->newLine();
     }
 }

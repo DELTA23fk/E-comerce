@@ -5,103 +5,221 @@ namespace App\Console\Commands;
 use App\Services\ProductoSyncService;
 use Illuminate\Console\Command;
 
+/**
+ * Comando de Sincronización Inicial de Productos CVA
+ * 
+ * Realiza la primera carga completa de productos desde CVA:
+ * - Crea productos nuevos
+ * - Establece relaciones de catálogo
+ * - Inserta precios iniciales
+ * - Inserta stock inicial
+ * - Inserta promociones activas
+ * - Descarga imágenes
+ * 
+ * Uso:
+ * php artisan sync:cva-products --all                    # Todas las páginas automáticamente
+ * php artisan sync:cva-products --page=5                 # Desde página específica
+ * php artisan sync:cva-products --upc=true --promos=true # Con filtros personalizados
+ */
 class SyncCvaProductosCommand extends Command
 {
-    protected $signature = 'sync:cva-products {--upc=true} {--dt=true} {--promos=true} {--dc=true} {--images=1} {--MonedaPesos=true} {--completos=1} {--exist=2}   {--page=1 : Página inicial} {--all : Sincronizar todas las páginas automáticamente}';
+    protected $signature = 'sync:cva-products 
+                            {--upc=true : Incluir productos con UPC}
+                            {--dt=true : Incluir descripción técnica}
+                            {--promos=true : Incluir promociones}
+                            {--dc=true : Incluir disponibilidad en CD}
+                            {--images=1 : Incluir imágenes}
+                            {--MonedaPesos=true : Solo productos en pesos mexicanos}
+                            {--completos=1 : Solo productos con datos completos}
+                            {--exist=2 : Nivel de existencia (1=con stock, 2=todos)}
+                            {--page=1 : Página inicial de sincronización}
+                            {--all : Sincronizar todas las páginas automáticamente}';
 
-    protected $description = 'Sincroniza productos de CVA con soporte para paginación y filtros';
+    protected $description = 'Sincronización inicial completa de productos desde CVA (primera carga)';
 
     public function handle(ProductoSyncService $syncService)
     {
-        $providerIdDb = 1; // ID del proveedor CVA en tu DB
+        $proveedorIdBd = 1; // ID del proveedor CVA en base de datos
         
-        $filters = array_filter([
+        // Construir filtros desde las opciones del comando
+        $filtros = array_filter([
             'upc' => $this->option('upc'),
             'dt'  => $this->option('dt'),
             'dc'  => $this->option('dc'),
             'exist' => $this->option('exist'),
             'completos' => $this->option('completos'),
-            'images'=> $this->option('images'),
+            'images' => $this->option('images'),
             'MonedaPesos' => $this->option('MonedaPesos'),
             'promos' => $this->option('promos')
         ]);
 
-        $startPage = (int) $this->option('page');
-        $syncAll = $this->option('all');
+        $paginaInicial = (int) $this->option('page');
+        $sincronizarTodo = $this->option('all');
 
-        $this->info("🚀 Iniciando sincronización CVA...");
-        
-        if (!empty($filters)) {
-            $this->info("Filtros aplicados: " . json_encode($filters));
-        }
+        // Mostrar encabezado
+        $this->mostrarEncabezado($filtros);
 
-        $currentPage = $startPage;
-        $totalPages = null;
-        $totalProcessed = 0;
-        $totalProductos = 0;
+        $paginaActual = $paginaInicial;
+        $totalPaginas = null;
+        $paginasProcesadas = 0;
+        $totalProductosProcesados = 0;
 
-
+        // Loop principal de sincronización
         do {
-            $this->info("📄 Procesando página {$currentPage}" . ($totalPages ? " de {$totalPages}" : ""));
+            $this->mostrarEncabezadoPagina($paginaActual, $totalPaginas);
             
-            $startTime = microtime(true);
+            $tiempoInicio = microtime(true);
             
             try {
-                $paginationInfo = $syncService->initialSyncCVA($providerIdDb, $filters, $currentPage);
+                // Ejecutar sincronización de la página actual
+                $infoPaginacion = $syncService->initialSyncCVA($proveedorIdBd, $filtros, $paginaActual);
                 
-                $duration = round(microtime(true) - $startTime, 2);
-                $this->info("✅ Página {$currentPage} procesada en {$duration}s");
+                $duracion = round(microtime(true) - $tiempoInicio, 2);
                 
-                $totalProcessed++;
+                $paginasProcesadas++;
 
-                if ($paginationInfo) {
-                    $totalPages = $paginationInfo['total_paginas'];
-                    $totalProductos += $paginationInfo['productos_procesados'] ?? 0;
+                if ($infoPaginacion) {
+                    $totalPaginas = $infoPaginacion['total_paginas'];
+                    $productosPagina = $infoPaginacion['productos_procesados'] ?? 0;
+                    $totalProductosProcesados += $productosPagina;
                     
-                    // Mostrar progreso
-                    $progreso = round(($currentPage / $totalPages) * 100, 1);
-                    $this->line("📊 Progreso: {$progreso}% ({$currentPage}/{$totalPages} páginas)");
-                    $this->newLine();
-
+                    // Mostrar resultados de la página
+                    $this->mostrarResultadosPagina($paginaActual, $productosPagina, $duracion);
                     
-                    if (!$syncAll && $currentPage < $totalPages) {
-                        // Preguntar ANTES de incrementar la página
-                        $nextPage = $currentPage + 1;
+                    // Mostrar progreso general
+                    $this->mostrarProgreso($paginaActual, $totalPaginas, $totalProductosProcesados);
+                    
+                    // Preguntar si continuar (solo si NO es modo --all)
+                    if (!$sincronizarTodo && $paginaActual < $totalPaginas) {
+                        $siguientePagina = $paginaActual + 1;
                         
-                        $shouldContinue = $this->confirm(
-                            "¿Continuar con la página {$nextPage} de {$totalPages}?",
-                            true // default es "yes"
-                        );
-                        
-                        if (!$shouldContinue) {
+                        if (!$this->confirm("¿Continuar con la página {$siguientePagina} de {$totalPaginas}?", true)) {
                             $this->warn("⏸️  Sincronización pausada por el usuario.");
                             break;
                         }
                     }
                     
-                    // Incrementar solo después de confirmar
-                    $currentPage++;
+                    // Incrementar página para siguiente iteración
+                    $paginaActual++;
                     
                 } else {
-                    // No hay más páginas
+                    // No hay más datos
                     $this->info("✅ No hay más páginas para procesar");
                     break;
                 }
                 
             } catch (\Exception $e) {
-                $this->error("❌ Error en página {$currentPage}: " . $e->getMessage());
+                $this->error("❌ Error en página {$paginaActual}: " . $e->getMessage());
+                $this->error($e->getTraceAsString());
                 
                 if ($this->confirm('¿Reintentar esta página?', true)) {
-                    continue;
+                    continue; // Reintentar la misma página
                 }
                 
-                break;
+                break; // Salir del loop
             }
             
-        } while ($currentPage <= $totalPages || $syncAll);
+        } while ($paginaActual <= $totalPaginas || ($sincronizarTodo && $infoPaginacion !== null));
 
-        $this->info("🎉 Sincronización completada. Total de páginas procesadas: {$totalProcessed}");
+        // Mostrar resumen final
+        $this->mostrarResumenFinal($paginasProcesadas, $totalProductosProcesados);
         
         return Command::SUCCESS;
+    }
+
+    /**
+     * Muestra el encabezado inicial del comando
+     */
+    protected function mostrarEncabezado(array $filtros): void
+    {
+        $this->newLine();
+        $this->info("╔═══════════════════════════════════════════════════════════╗");
+        $this->info("║      SINCRONIZACIÓN INICIAL DE PRODUCTOS CVA              ║");
+        $this->info("╚═══════════════════════════════════════════════════════════╝");
+        $this->newLine();
+        
+        $this->info("🚀 Iniciando sincronización completa (primera carga)");
+        
+        if (!empty($filtros)) {
+            $this->newLine();
+            $this->info("📋 Filtros aplicados:");
+            foreach ($filtros as $clave => $valor) {
+                $this->line("  • {$clave}: {$valor}");
+            }
+        }
+        
+        $this->newLine();
+        $this->line("📦 Esta operación creará:");
+        $this->line("  ✓ Productos nuevos");
+        $this->line("  ✓ Relaciones de catálogo (categorías, marcas, familias)");
+        $this->line("  ✓ Precios iniciales");
+        $this->line("  ✓ Stock inicial");
+        $this->line("  ✓ Promociones activas");
+        $this->line("  ✓ Imágenes de productos");
+        $this->newLine();
+    }
+
+    /**
+     * Muestra encabezado de cada página
+     */
+    protected function mostrarEncabezadoPagina(int $paginaActual, ?int $totalPaginas): void
+    {
+        $infoPagina = "📄 Procesando página {$paginaActual}";
+        if ($totalPaginas) {
+            $infoPagina .= " de {$totalPaginas}";
+        }
+        
+        $this->info(str_repeat('─', 60));
+        $this->info($infoPagina);
+        $this->info(str_repeat('─', 60));
+    }
+
+    /**
+     * Muestra los resultados de la página procesada
+     */
+    protected function mostrarResultadosPagina(int $pagina, int $productos, float $duracion): void
+    {
+        $this->newLine();
+        $this->info("✅ Página {$pagina} completada exitosamente");
+        $this->line("  ⏱️  Tiempo: {$duracion}s");
+        $this->line("  📦 Productos procesados: {$productos}");
+        $this->newLine();
+    }
+
+    /**
+     * Muestra barra de progreso
+     */
+    protected function mostrarProgreso(int $actual, int $total, int $productosTotal): void
+    {
+        $porcentaje = round(($actual / $total) * 100, 1);
+        $barraLlena = (int)($porcentaje / 2);
+        $barraVacia = 50 - $barraLlena;
+        $barraProgreso = str_repeat('█', $barraLlena) . str_repeat('░', $barraVacia);
+        
+        $this->line("📊 Progreso general: [{$barraProgreso}] {$porcentaje}%");
+        $this->line("📈 Total de productos sincronizados: {$productosTotal}");
+        $this->newLine();
+    }
+
+    /**
+     * Muestra resumen final de la sincronización
+     */
+    protected function mostrarResumenFinal(int $paginasProcesadas, int $totalProductos): void
+    {
+        $this->newLine();
+        $this->info("╔═══════════════════════════════════════════════════════════╗");
+        $this->info("║          RESUMEN FINAL DE SINCRONIZACIÓN                  ║");
+        $this->info("╚═══════════════════════════════════════════════════════════╝");
+        $this->newLine();
+        
+        $this->line("  📄 Total de páginas procesadas: {$paginasProcesadas}");
+        $this->line("  📦 Total de productos sincronizados: {$totalProductos}");
+        
+        $this->newLine();
+        $this->info("🎉 Sincronización inicial completada exitosamente");
+        $this->newLine();
+        
+        $this->comment("💡 Para actualizar productos existentes, use:");
+        $this->line("   php artisan update:cva-products --type=all");
     }
 }

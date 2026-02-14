@@ -3,12 +3,14 @@
 use App\Http\Controllers\Api\V1\Admin\ManagerUserController;
 use App\Http\Controllers\Api\V1\Auth\AuthController as ApiAuthController;
 use App\Http\Controllers\Api\V1\Client\ClientController;
+use App\Http\Controllers\Api\V1\Orders\OrderController;
 use App\Http\Controllers\Api\V1\Product\ProductCatalogController;
 use App\Http\Controllers\Api\V1\Product\ProductoController;
 use App\Http\Controllers\Api\V1\Product\ProductOfferController;
 use App\Http\Controllers\Api\V1\Product\ProductProviderController;
 use App\Http\Controllers\Api\V1\Product\ProductSearchController;
 use App\Http\Controllers\Api\V1\Product\ProductStockController;
+use App\Http\Controllers\Api\V1\Shipment\ShipmentCvaController;
 use App\Http\Controllers\Spa\Auth\AuthController as SpaAuthController;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
@@ -209,6 +211,15 @@ Route::prefix('v1')->group(function () {
             Route::delete('usuarios/{usuarioId}/rol', [ManagerUserController::class, 'removeRole'])
                 ->name('usuarios.rol.destroy');
         });
+
+        //COTIZAR PEDIDOS
+        Route::prefix('pedidos')->group(function(){
+            Route::post('cotizar/envios/productos',[OrderController::class,'cotizarEnvio']);
+            Route::post('generar',[OrderController::class,'store']);
+            Route::post('{pedido}/confirmar',[OrderController::class,'confirmarPedido']);
+
+        });
+        //pedido
 
     });
 });
