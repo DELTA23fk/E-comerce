@@ -4,7 +4,6 @@ namespace App\Services\Providers;
 
 use App\Contratos\ProveedorServiceInterface;
 use App\Data\Pedidos\PedidoProveedorRequestData;
-use App\Data\Pedidos\PedidoProveedorResponseData;
 use App\Data\Response\ApiResponseData;
 use App\Exceptions\Cva\CvaStockException;
 use App\Exceptions\Orders\ShippingException;
@@ -32,7 +31,7 @@ class CvaProviderService implements ProveedorServiceInterface
     public function crearPedido(PedidoProveedorRequestData $request, Cliente $cliente): array
     {
         try {
-            // Validar alcance de envío
+            // Validaciones previas (fuera de transacción)
             if (!$this->validarAlcanceDeEnvio($cliente)) {
                 return [
                     'success' => false,
@@ -40,13 +39,8 @@ class CvaProviderService implements ProveedorServiceInterface
                 ];
             }
 
-            // Validar disponibilidad de stock
             $this->validarDisponibilidad($request->productos);
-
-            // Obtener distribución de productos entre CEDIS y Sucursal
             $distribucion = $this->distribucionStock($request->productos);
-
-            // Calcular costo de envío
             $costoEnvioData = $this->calcularCostoEnvio($distribucion, $cliente);
 
             if (!$costoEnvioData->success) {
@@ -56,72 +50,85 @@ class CvaProviderService implements ProveedorServiceInterface
                 ];
             }
 
-            $envios = $costoEnvioData->data['envios'];
-            $respuestas = [];
+            //TRANSACCIÓN: Descontar primero, crear después
+            return \DB::transaction(function () use ($request, $cliente, $distribucion, $costoEnvioData) {
+                $envios = $costoEnvioData->data['envios'];
+                $respuestas = [];
 
-            // Payload base para ambos pedidos
-            $payloadBase = [
-                'test' => $request->test ?? true,
-                'num_oc' => $request->numeroOrden,
-                'observaciones' => $request->observaciones ?? '',
-                'tipo_flete' => 'FF',
-                'cotiza_flete' => $request->cotiza_flete,
-                'flete' => $this->formatearDatosEnvio($cliente, $request->datosEnvio)
-            ];
-
-            //Crear pedido desde CEDIS
-            if (!empty($distribucion['productos_cedis'])) {
-                $payload = array_merge($payloadBase, [
-                    'codigo_sucursal' => $this->CLAVE_CEDIS_GDL, // ← Ahora correcto
-                    'productos' => array_values($distribucion['productos_cedis']) // ← Ahora correcto
-                ]);
-
-                $response = $this->cvaRepository->crearOrden($payload);
-
-                $respuestas[] = [
-                    'folioPedido' => $response['pedido'],
-                    'subtotal' => $response['subtotal'],
-                    'iva' => $response['iva'] ?? 0,
-                    'total' => $response['total'],
-                    'moneda' => $response['moneda'] ?? 'MXN',
-                    'emailAgente' => $response['email_agente'] ?? null,
-                    'emailAlmacen' => $response['email_almacen'] ?? null,
-                    'flete' => $envios['cedis'] ?? [], // ← Flete específico de CEDIS
-                    'origen' => 'CEDIS'
+                $payloadBase = [
+                    'test' => $request->test ?? true,
+                    'num_oc' => $request->numeroOrden,
+                    'observaciones' => $request->observaciones ?? '',
+                    'tipo_flete' => 'FF',
+                    'cotiza_flete' => $request->cotiza_flete,
+                    'flete' => $this->formatearDatosEnvio($cliente, $request->datosEnvio)
                 ];
-            }
 
-            // Crear pedido desde Sucursal
-            if (!empty($distribucion['productos_sucursal'])) {
-                $payload = array_merge($payloadBase, [
-                    'codigo_sucursal' => $this->CLAVE_SUCURSAL_GDL, // ← Ahora correcto
-                    'productos' => array_values($distribucion['productos_sucursal']) // ← Ahora correcto
-                ]);
+                // PEDIDO DESDE CEDIS
+                if (!empty($distribucion['productos_cedis'])) {
+                    // 1️⃣ Descontar stock_cd primero
+                    $this->descontarStockLocal($distribucion['productos_cedis'], 'stock_cd');
 
-                $response = $this->cvaRepository->crearOrden($payload);
+                    // 2️⃣ Crear pedido en CVA
+                    $payload = array_merge($payloadBase, [
+                        'codigo_sucursal' => $this->CLAVE_CEDIS_GDL,
+                        'productos' => array_values($distribucion['productos_cedis'])
+                    ]);
 
-                $respuestas[] = [
-                    'folioPedido' => $response['pedido'],
-                    'subtotal' => $response['subtotal'],
-                    'iva' => $response['iva'] ?? 0,
-                    'total' => $response['total'],
-                    'moneda' => $response['moneda'] ?? 'MXN',
-                    'emailAgente' => $response['email_agente'] ?? null,
-                    'emailAlmacen' => $response['email_almacen'] ?? null,
-                    'flete' => $envios['sucursal'] ?? [], // ← Flete específico de Sucursal
-                    'origen' => 'Sucursal'
+                    $response = $this->cvaRepository->crearOrden($payload);
+                    // Si falla → ROLLBACK automático ✅
+
+                    $respuestas[] = [
+                        'folioPedido' => $response['pedido'],
+                        'subtotal' => $response['subtotal'],
+                        'iva' => $response['iva'] ?? 0,
+                        'total' => $response['total'],
+                        'moneda' => $response['moneda'] ?? 'MXN',
+                        'emailAgente' => $response['email_agente'] ?? null,
+                        'emailAlmacen' => $response['email_almacen'] ?? null,
+                        'flete' => $envios['cedis'] ?? [],
+                        'origen' => 'CEDIS'
+                    ];
+                }
+
+                // PEDIDO DESDE SUCURSAL
+                if (!empty($distribucion['productos_sucursal'])) {
+                    // 1️⃣ Descontar stock primero
+                    $this->descontarStockLocal($distribucion['productos_sucursal'], 'stock');
+
+                    // 2️⃣ Crear pedido en CVA
+                    $payload = array_merge($payloadBase, [
+                        'codigo_sucursal' => $this->CLAVE_SUCURSAL_GDL,
+                        'productos' => array_values($distribucion['productos_sucursal'])
+                    ]);
+
+                    $response = $this->cvaRepository->crearOrden($payload);
+                    // Si falla → ROLLBACK de TODO ✅
+
+                    $respuestas[] = [
+                        'folioPedido' => $response['pedido'],
+                        'subtotal' => $response['subtotal'],
+                        'iva' => $response['iva'] ?? 0,
+                        'total' => $response['total'],
+                        'moneda' => $response['moneda'] ?? 'MXN',
+                        'emailAgente' => $response['email_agente'] ?? null,
+                        'emailAlmacen' => $response['email_almacen'] ?? null,
+                        'flete' => $envios['sucursal'] ?? [],
+                        'origen' => 'Sucursal'
+                    ];
+                }
+
+                // 3️⃣ Solo llega aquí si TODO fue exitoso
+                return [
+                    'success' => true,
+                    'data' => $respuestas,
+                    'metadata' => [
+                        'requiere_envios_multiples' => $distribucion['requiere_envios_multiples'],
+                        'total_envios' => $costoEnvioData->data['totales'],
+                        'distribucion' => $distribucion['distribucion_productos']
+                    ]
                 ];
-            }
-
-            return [
-                'success' => true,
-                'data' => $respuestas,
-                'metadata' => [
-                    'requiere_envios_multiples' => $distribucion['requiere_envios_multiples'],
-                    'total_envios' => $costoEnvioData->data['totales'],
-                    'distribucion' => $distribucion['distribucion_productos']
-                ]
-            ];
+            });
 
         } catch (CvaStockException $e) {
             \Log::warning('Stock insuficiente en CVA', [
@@ -146,6 +153,32 @@ class CvaProviderService implements ProveedorServiceInterface
                 'error' => 'Error al procesar pedido con CVA: ' . $e->getMessage()
             ];
         }
+    }
+
+    /**
+     * Descontar stock local de forma segura
+     */
+    private function descontarStockLocal(array $productos, string $campoStock): void
+    {
+        foreach ($productos as $producto) {
+            $actualizado = \DB::table('proveedor_productos')
+                ->where('codigo_proveedor', $producto['clave'])
+                ->where($campoStock, '>=', $producto['cantidad']) // Validación extra
+                ->decrement($campoStock, $producto['cantidad']);
+
+            if (!$actualizado) {
+                throw new CvaStockException(
+                    "No se pudo descontar stock de {$producto['clave']}. " .
+                    "Posible inconsistencia en stock disponible.",
+                    500
+                );
+            }
+        }
+
+        \Log::info('Stock descontado localmente', [
+            'productos' => collect($productos)->pluck('clave')->toArray(),
+            'campo' => $campoStock
+        ]);
     }
 
     /**

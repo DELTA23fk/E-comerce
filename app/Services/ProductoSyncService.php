@@ -592,7 +592,6 @@ class ProductoSyncService
                                     ->where('id', $ultimaPromocion->id)
                                     ->update([
                                         'en_oferta' => false,
-                                        'fecha_fin' => now(),
                                         'updated_at' => now()
                                     ]);
                                 $estadisticas['expiradas']++;
@@ -607,20 +606,17 @@ class ProductoSyncService
                                 
                             $estadisticas['creadas']++;
                         } 
-                        elseif ((string)$ultimaPromocion->disponible_en_promocion !== (string)$nuevaPromocionDatos['disponible_en_promocion']) {
-                            // Actualizar solo stock de promoción existente
+                        else{                            // Actualizar solo stock de promoción existente
                             DB::table('proveedor_producto_promociones')
                                 ->where('id', $ultimaPromocion->id)
-                                ->update([
+                               ->update([
+                                    'total_descuento' => $nuevaPromocionDatos['total_descuento'],
+                                    'precio_con_descuento' => $nuevaPromocionDatos['precio_con_descuento'],
                                     'disponible_en_promocion' => $nuevaPromocionDatos['disponible_en_promocion'],
-                                    'ultima_actualizacion' => now(),
                                     'updated_at' => now()
                                 ]);
                                 
                             $estadisticas['stock_actualizado']++;
-                        } 
-                        else {
-                            $estadisticas['sin_cambios']++;
                         }
                     } else {
                         // El producto YA NO es oferta
@@ -631,7 +627,6 @@ class ProductoSyncService
                                     ->where('id', $ultimaPromocion->id)
                                     ->update([
                                         'en_oferta' => false,
-                                        'fecha_fin' => now(),
                                         'updated_at' => now()
                                     ]);
                             }
