@@ -162,12 +162,15 @@ class CvaRepository
         $response = Http::withToken($this->obtenerTokenCva())
             ->post($this->URLBASE.'pedidos_web/crear_orden',$data);
 
-            if ($response->failed()) {
+        if ($response->failed()) {
+            $errorEspecifico = $response->json('message');
             throw new CvaApiException(
-                "Error al registrar el pedido con CVA",
+                "Error al registrar el pedido con CVA: {$errorEspecifico}",
                 $response->status()
             );
         }
+
+       
 
         if ($response->successful()) {
             return $response->json();

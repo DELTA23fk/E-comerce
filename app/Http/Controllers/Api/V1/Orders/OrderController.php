@@ -2,7 +2,6 @@
 
 namespace App\Http\Controllers\Api\V1\Orders;
 
-use App\Data\Cva\ArticuloMinimoData;
 use App\Data\Pedidos\PedidoData;
 use App\Http\Controllers\Controller;
 use App\Models\Pedido;
@@ -37,23 +36,24 @@ class OrderController extends Controller
             if (!$cliente) {
                 return response()->json([
                     'success' => false,
-                    'message' => 'Aun no ha terminado de llenar los datos de envio'
-                ], 422); // Un 422 (Unprocessable Entity) es más semántico aquí
+                    'error' => 'Cliente no encontrado'
+                ], 404);
             }
 
-            // Importante: Pasa solo la parte de productos al orquestador
+            // Cotizar envío sin crear pedido
             $cotizacion = $this->orquestador->cotizarEnvioProductos(
-                $request->productos->toArray(), 
+                $request->productos->toArray(),
                 $cliente
             );
 
             return response()->json([
                 'success' => true,
                 'data' => [
+                    'cotizaciones_por_proveedor' => $cotizacion['cotizaciones'],
                     'total_envio' => $cotizacion['total_envio'],
-                    'cotizaciones' => $cotizacion['cotizaciones'], 
-                    // Eliminamos el desglose manual ya que es el mismo array
-                ]
+                    'proveedores_involucrados' => count($cotizacion['cotizaciones'])
+                ],
+                'advertencias' => $cotizacion['errores_proveedores'] ?? []
             ]);
 
         } catch (\Exception $e) {

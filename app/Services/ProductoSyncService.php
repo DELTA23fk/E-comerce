@@ -16,19 +16,18 @@ use App\Repository\CvaRepository;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Spatie\LaravelData\DataCollection;
 
 /**
- * Servicio de Sincronización de Productos - VERSIÓN MEJORADA Y CORREGIDA
+ * Servicio de Sincronización de Productos
  * 
  * Mejoras implementadas:
- * ✅ Transacciones con bloqueos pesimistas
- * ✅ Manejo automático de deadlocks con reintentos
- * ✅ Bloqueos granulares para mejor concurrencia
- * ✅ Fix para grupos con barras escapadas (\/)
- * ✅ Fallback a "General" para evitar NULLs
+ * Transacciones con bloqueos pesimistas
+ * Manejo automático de deadlocks con reintentos
+ * Bloqueos granulares para mejor concurrencia
+ * Fix para grupos con barras escapadas (\/)
+ * Fallback a "General" para evitar NULLs
  * 
  * Estrategias disponibles:
  * 1. Sincronización inicial completa (initialSyncCVA)
@@ -203,7 +202,7 @@ class ProductoSyncService
      */
     public function updateSingleArticleCVA(int $proveedorIdBd, string $idArticulo): array
     {
-        $filtros = ['id' => $idArticulo];
+        $filtros = ['clave' => $idArticulo,'upc' => true,'promos' => true,'MonedaPesos' => true];
         $articulo = $this->apiCva->getSingleProductByClave($filtros);
 
         if (!isset($articulo) || is_null($articulo)) {
@@ -222,7 +221,6 @@ class ProductoSyncService
                 $this->actualizarPrecioIndividualConBloqueo($dto, $proveedorProducto->id);
                 $this->actualizarStockIndividualConBloqueo($dto, $proveedorProducto->id);
                 $this->actualizarPromocionIndividualConBloqueo($dto, $proveedorProducto->id);
-                $this->actualizarImagenesProducto($dto, $producto->id);
             }, attempts: 5);
 
             return [
@@ -853,7 +851,7 @@ class ProductoSyncService
     }
 
     /**
-     * ✅ NUEVO: Procesa el nombre del grupo manejando barras escapadas
+     * Procesa el nombre del grupo manejando barras escapadas
      * 
      * Casos que maneja:
      * 1. "SOPORTES Y BASES P\/TV\/ PROYECTORES\/..." → "SOPORTES Y BASES P"
@@ -1153,7 +1151,7 @@ class ProductoSyncService
     // =========================================================================
 
     /**
-     * ✅ NUEVO: Asegura que existan registros "General" en todas las tablas maestras
+     *Asegura que existan registros "General" en todas las tablas maestras
      */
     protected function asegurarRegistrosGeneralesExisten(): void
     {

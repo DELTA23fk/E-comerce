@@ -121,6 +121,7 @@ Route::prefix('v1')->group(function () {
             
             // Proveedores por producto
             Route::get('/{productoId}/listado', [ProductProviderController::class, 'proveedoresPorProducto']);
+
         });
 
         Route::prefix('productos/stock')->group(function () {
