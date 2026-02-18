@@ -56,9 +56,9 @@ class ProveedorProducto extends Model
         return $this->belongsTo(Producto::class);
     }
 
-    public function pricios()
+    public function pricio()
     {
-        return $this->hasMany(ProveedorProductoPrecio::class);
+        return $this->hasOne(ProveedorProductoPrecio::class);
     }
 
     public function promociones()

@@ -46,8 +46,8 @@ class ProductRealtimeUpdateService
             }
 
             // Match del proveedor con su API
-            $updated = match($proveedor->codigo_proveedor) {
-                'CVA' => $this->actualizarDesdeCVA($proveedorProducto->proveedor_producto_id, $proveedorId),
+            $updated = match(strtolower($proveedor->codigo_proveedor)) {
+                'cva' => $this->actualizarDesdeCVA($proveedorProducto->codigo_proveedor, $proveedorId),
                 // Aquí puedes agregar más proveedores
                 // 'CT' => $this->actualizarDesdeCT($proveedorProducto->codigo_proveedor, $proveedorId),
                 // 'INGRAM' => $this->actualizarDesdeIngram($proveedorProducto->codigo_proveedor, $proveedorId),
@@ -149,7 +149,7 @@ class ProductRealtimeUpdateService
                 } else {
                     // Verificar si fue error o proveedor no soportado
                     $proveedor = $pp->proveedor;
-                    if ($proveedor && !in_array($proveedor->codigo_proveedor, ['CVA'])) {
+                    if ($proveedor && !in_array($proveedor->codigo_proveedor, ['cva'])) {
                         $stats['no_soportados']++;
                     } else {
                         $stats['errores']++;

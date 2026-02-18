@@ -43,7 +43,7 @@ class ProductProviderService
         // Siempre incluir la relación del proveedor específico
         $builder->with(['proveedorProductos' => function ($q) use ($proveedorId) {
             $q->where('proveedor_id', $proveedorId)
-                ->with(['proveedor', 'pricios', 'promociones']);
+                ->with(['proveedor', 'pricio', 'promociones']);
         }]);
 
         $perPage = min(max((int)$request->get('per_page', 15), 1), 100);
@@ -63,7 +63,7 @@ class ProductProviderService
 
         $producto = Producto::with([
             'proveedorProductos.proveedor',
-            'proveedorProductos.pricios' => function ($q) {
+            'proveedorProductos.pricio' => function ($q) {
                 $q->latest('ultima_actualizacion')->limit(1);
             }
         ])->findOrFail($productoId);
@@ -123,7 +123,7 @@ class ProductProviderService
 
         $producto = Producto::with([
             'proveedorProductos.proveedor',
-            'proveedorProductos.pricios' => function ($q) use ($fechaInicio) {
+            'proveedorProductos.pricio' => function ($q) use ($fechaInicio) {
                 $q->where('created_at', '>=', $fechaInicio)
                     ->orderBy('created_at', 'desc');
             }
@@ -157,7 +157,7 @@ class ProductProviderService
     {
         $this->realtimeUpdateService->actualizarTodosLosProveedores($productoId);
 
-        return ProveedorProducto::with(['proveedor', 'pricios' => function ($q) {
+        return ProveedorProducto::with(['proveedor', 'pricio' => function ($q) {
             $q->latest('ultima_actualizacion')->limit(1);
         }])
             ->where('producto_id', $productoId)
