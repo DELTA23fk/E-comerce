@@ -72,7 +72,6 @@ class ProductRelationService
             return $relations;
         }
 
-        $proveedorRelation = 'proveedorProductos';
         $nestedRelations = [];
 
         // Sub-relaciones de proveedor
@@ -88,16 +87,21 @@ class ProductRelationService
             }
         }
 
-        // Si hay sub-relaciones, las agregamos con dot notation
-        if (!empty($nestedRelations)) {
-            foreach ($nestedRelations as $nested) {
-                $relations[] = "{$proveedorRelation}.{$nested}";
-            }
-        } else {
-            $relations[] = $proveedorRelation;
+        $loadProveedor = in_array('proveedor', $nestedRelations);
+        if (!$loadProveedor) {
+            $nestedRelations[] = 'proveedor';
         }
 
-        return $relations;
+        return [
+            'proveedorProductos' => function ($q) use ($nestedRelations, $loadProveedor) {
+                // Solo proveedores activos
+                $q->whereHas('proveedor', fn($q) => $q->where('activo', true));
+
+                if (!empty($nestedRelations)) {
+                    $q->with($nestedRelations);
+                }
+            },
+        ];
     }
 
     /**
