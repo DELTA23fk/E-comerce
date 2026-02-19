@@ -5,11 +5,16 @@ namespace App\Services;
 use App\Data\Client\ClientData;
 use App\Data\Request\RequestClientData;
 use App\Data\Response\ApiResponseData;
+use App\Data\Seller\RequestClientUser;
 use App\Models\Cliente;
 use Illuminate\Support\Facades\Auth;
 
 class ClienteService
 {
+    public function __construct(
+        private readonly UserService $userService
+    ) {
+    }
     public function create(RequestClientData $data):ApiResponseData
     {
         $user = Auth::user();
@@ -77,9 +82,19 @@ class ClienteService
         );
     }
 
-    private function findById(int $id): ?Cliente
-    {
-        return Cliente::find($id);
+
+    public function getByPhone(string $phone):?Cliente{
+        return Cliente::where('telefono',trim($phone))->first();
+    }
+
+    public function getByRfc(string $rfc):?Cliente{
+        return Cliente::where('rfc',strtoupper(trim($rfc)))->first();
+    }
+
+    public function registerClienteWithUser(RequestClientUser $request):?Cliente{
+        $usuario = $this->userService->create($request->usuario);
+        $usuario->cliente()->create($request->cliente->toArray());
+        return Cliente::where('usuario_id',$usuario->id)->with(['user']);
     }
 
     private function findByUserId(int|string $id):?Cliente{

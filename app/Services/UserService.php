@@ -9,7 +9,7 @@ use App\Data\User\UserCustomData;
 use App\Data\User\UserData;
 use App\Enum\User\UserType;
 use App\Models\User;
-
+use App\Data\Client\RequestClientBasic;
 class UserService
 {
     public function getUser(User $user): UserData
@@ -20,7 +20,7 @@ class UserService
     /**
      * Crear usuario con tipo específico
      */
-    public function create( RegisterUserData|UserCustomData $data, ?UserType $type = null): User
+    public function create( RegisterUserData|UserCustomData |RequestClientBasic $data, ?UserType $type = null): User
     {
         // Si es UserCustomData, usa su tipo
         // Si es RegisterUserData, usa el tipo pasado o CUSTOMER por defecto
