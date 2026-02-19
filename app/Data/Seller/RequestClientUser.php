@@ -2,7 +2,7 @@
 
 namespace App\Data\Seller;
 
-use App\Data\Request\Client\RequestClientBasic;
+use App\Data\Client\RequestClientBasic;
 use App\Data\User\RegisterUserData;
 use Spatie\LaravelData\Data;
 

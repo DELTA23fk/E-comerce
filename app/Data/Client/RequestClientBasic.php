@@ -21,7 +21,7 @@ class RequestClientBasic extends Data
         #[Max(100)]
         public string $apellidos,
         
-        #[Max(10), Min(10)]
+        #[Max(10), Min(10), Unique('clientes','telefono')]
         public ?string $telefono,
         
         #[Max(250)]
@@ -57,19 +57,23 @@ class RequestClientBasic extends Data
 
 
     public static function prepareForPipeline(array $properties): array
-    {
-        return collect($properties)->map(function ($value, $key) {
-            if (is_string($value)) {
-                $value = trim($value);
-            }
-            return match($key){
-                'nombre','apellidos' => Str::title($value),
-                'rfc' => Str::upper(str_replace([' ','-'],'',$value)),
-                'razon_social' => Str::upper($value),
-                'telefono' => str_replace([' ','-','(',')'],'',$value),
-                default => $value,
-            };
-        })->toArray();
+    {   
+        // Es mejor extraer 'cliente' si viene anidado o manejarlo directamente
+        $data = $properties;
+
+        if (isset($data['telefono'])) {
+            $data['telefono'] = preg_replace('/[^0-9]/', '', $data['telefono']);
+        }
+
+        if (isset($data['rfc'])) {
+            $data['rfc'] = strtoupper(str_replace([' ', '-'], '', $data['rfc']));
+        }
+
+        if (isset($data['nombre'])) $data['nombre'] = Str::title(trim($data['nombre']));
+        if (isset($data['apellidos'])) $data['apellidos'] = Str::title(trim($data['apellidos']));
+        if (isset($data['razon_social'])) $data['razon_social'] = strtoupper(trim($data['razon_social']));
+
+        return $data;
     }
 
     public static function messages(): array

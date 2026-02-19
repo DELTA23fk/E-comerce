@@ -61,7 +61,7 @@ Route::prefix('v1')->group(function () {
 
         Route::prefix('categorias')->controller(CategoryController::class)->group(function () {
             // --- CRUD principal -------------------------------------------
-            Route::get('/',    'index');                          
+            Route::get('/','index');                          
             Route::get('/{id}','show');                           
             // Route::post('/',   'store')->middleware('role:admin');                          
             // Route::match(['put','patch'], '/{categoria}', 'update')->middleware('role:admin');
@@ -71,13 +71,13 @@ Route::prefix('v1')->group(function () {
             // Route::prefix('/{categoria}/subcategorias')->group(function () {
 
             //     // Agrega subcategorías sin quitar las que ya existen
-            //     Route::post('/attach',  'attachSubcategorias');   // POST   /api/categorias/{categoria}/subcategorias/attach
+            //     Route::post('/attach',  'attachSubcategorias');
 
             //     // Quita subcategorías específicas
-            //     Route::delete('/detach','detachSubcategorias');   // DELETE /api/categorias/{categoria}/subcategorias/detach
+            //     Route::delete('/detach','detachSubcategorias');
 
             //     // Reemplaza TODAS las subcategorías con el nuevo conjunto
-            //     Route::put('/sync','syncSubcategorias');     // PUT    /api/categorias/{categoria}/subcategorias/sync
+            //     Route::put('/sync','syncSubcategorias');
             // })->middleware('role:admin');
 
             // --- Caché ---------------------------------------------------
@@ -85,41 +85,41 @@ Route::prefix('v1')->group(function () {
         });
 
         Route::prefix('familias')->controller(FamilyController::class)->group(function () {
-            Route::get('/',                          'index');    
-            Route::get('/{id}',                      'show');     
-            Route::post('/',                         'store')->middleware('role:admin');    
+            Route::get('/','index');    
+            Route::get('/{id}','show');     
+            Route::post('/','store')->middleware('role:admin');    
             // Route::match(['put','patch'],'/{familia}','update')->middleware('role:admin');  
             // Route::delete('/{familia}',              'destroy')->middleware('role:admin');  
-            Route::post('/cache/refresh',            'refreshCache');
+            Route::post('/cache/refresh','refreshCache');
         });
 
         Route::prefix('grupos')->controller(GroupController::class)->group(function () {
-            Route::get('/',                        'index');      // GET    /api/grupos
-            Route::get('/{id}',                    'show');       // GET    /api/grupos/{id}
-            // Route::post('/',                       'store')->middleware('role:admin');      // POST   /api/grupos
-            // Route::match(['put','patch'],'/{grupo}','update')->middleware('role:admin');    // PUT|PATCH
-            // Route::delete('/{grupo}',              'destroy')->middleware('role:admin');    // DELETE
-            Route::post('/cache/refresh',          'refreshCache');
+            Route::get('/','index');      
+            Route::get('/{id}','show');      
+            // Route::post('/',                       'store')->middleware('role:admin');     
+            // Route::match(['put','patch'],'/{grupo}','update')->middleware('role:admin');    
+            // Route::delete('/{grupo}',              'destroy')->middleware('role:admin');   
+            Route::post('/cache/refresh','refreshCache');
         });
 
         Route::prefix('marcas')->controller(BrandController::class)->group(function () {
-            Route::get('/',                        'index');      // GET    /api/marcas
-            Route::get('/{id}',                    'show');       // GET    /api/marcas/{id}
-            // Route::post('/',                       'store')->middleware('role:admin');      // POST   /api/marcas
-            // Route::match(['put','patch'],'/{marca}','update')->middleware('role:admin');    // PUT|PATCH
-            // Route::delete('/{marca}',              'destroy')->middleware('role:admin');    // DELETE
-            Route::post('/cache/refresh',          'refreshCache');
+            Route::get('/','index');
+            Route::get('/{id}','show');
+            // Route::post('/',                       'store')->middleware('role:admin'); 
+            // Route::match(['put','patch'],'/{marca}','update')->middleware('role:admin');
+            // Route::delete('/{marca}',              'destroy')->middleware('role:admin');
+            Route::post('/cache/refresh','refreshCache');
         });
 
         Route::prefix('proveedores')->controller(ProviderController::class)->group(function () {
-            Route::get('/',                              'index');         // GET    /api/proveedores(?solo_activos=true)
-            Route::get('/codigo/{codigo}',               'showByCodigo');  // GET    /api/proveedores/codigo/{codigo}
-            Route::get('/{id}',                          'show');          // GET    /api/proveedores/{id}
-            // Route::post('/',                             'store')->middleware('role:admin');         // POST   /api/proveedores
-            // Route::match(['put','patch'],'/{proveedor}', 'update')->middleware('role:admin');        // PUT|PATCH
-            Route::patch('/{proveedor}/toggle-activo',   'toggleActivo')->middleware('role:admin');  // PATCH  /api/proveedores/{id}/toggle-activo
-            // Route::delete('/{proveedor}',                'destroy')->middleware('role:admin');       // DELETE
-            Route::post('/cache/refresh',                'refreshCache');  // POST   /api/proveedores/cache/refresh
+            Route::get('/','index');        
+            Route::get('/codigo/{codigo}','showByCodigo');
+            Route::get('/{id}','show');
+            // Route::post('/','store')->middleware('role:admin');
+            // Route::match(['put','patch'],'/{proveedor}', 'update')->middleware('role:admin');
+            Route::patch('/{proveedor}/toggle-activo','toggleActivo')->middleware('role:admin');
+            // Route::delete('/{proveedor}',                'destroy')->middleware('role:admin'); 
+            Route::post('/cache/refresh','refreshCache');
         });
 
         Route::prefix('productos')->group(function(){
@@ -283,6 +283,8 @@ Route::prefix('v1')->group(function () {
         //vendedor
         Route::prefix('vendedor')->controller(SellerController::class)->group(function(){
             Route::post('registrar/cliente','RegistrarCliente');
+            Route::get('/obtener/cliente/telefono','obtenerClientePorTelefono');
+            Route::get('/obtener/cliente/rfc','obtenerClientePorRfc');
         });
 
         //COTIZAR PEDIDOS

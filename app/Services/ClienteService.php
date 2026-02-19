@@ -94,7 +94,7 @@ class ClienteService
     public function registerClienteWithUser(RequestClientUser $request):?Cliente{
         $usuario = $this->userService->create($request->usuario);
         $usuario->cliente()->create($request->cliente->toArray());
-        return Cliente::where('usuario_id',$usuario->id)->with(['user']);
+        return Cliente::where('user_id',$usuario->id)->with(['user'])->first();
     }
 
     private function findByUserId(int|string $id):?Cliente{

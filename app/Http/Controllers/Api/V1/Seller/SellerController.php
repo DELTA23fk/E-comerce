@@ -20,12 +20,12 @@ class SellerController extends Controller
         return response()->json($result,$result->success ? 201 : 400);
     }
     public function obtenerClientePorTelefono(RequestSearchClient $request){
-        $result = $this->sellerService->obtenerClientePorTelefono($request->telefono);
+        $result = $this->sellerService->obtenerClientePorTelefono($request);
         return response()->json($result, $result->success? 200 : 400);
     }
 
     public function obtenerClientePorRfc(RequestSearchClient $request){
-        $result = $this->sellerService->obtenerClientePorTelefono($request->rfc);
+        $result = $this->sellerService->obtenerClientePorRfc($request);
         return response()->json($result, $result->success? 200 : 400);
     }
 

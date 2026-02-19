@@ -4,6 +4,7 @@ namespace App\Services\Sellers;
 
 use App\Data\Response\ApiResponseData;
 use App\Data\Seller\RequestClientUser;
+use App\Data\Seller\RequestSearchClient;
 use App\Services\ClienteService;
 
 class SellerService
@@ -31,14 +32,14 @@ class SellerService
         );
     }
 
-    public function obtenerClientePorTelefono(string $telefono){
-        if(is_null($telefono) || empty($telefono)){
+    public function obtenerClientePorTelefono(RequestSearchClient $request){
+        if(is_null($request->telefono) || empty($request->telefono)){
             return new ApiResponseData(
                     success:false,
                     message:'Telefono no recibido'
                 );
         }
-        $data = $this->clienteService->getByPhone($telefono);
+        $data = $this->clienteService->getByPhone($request->telefono);
         if(!$data){
             return new ApiResponseData(
                     success:false,
@@ -52,14 +53,14 @@ class SellerService
         );
     }
 
-    public function obtenerClientePorRfc(string $rfc){
-        if(is_null($rfc) || empty($rfc)){
+    public function obtenerClientePorRfc(RequestSearchClient $request){
+        if(is_null($request->rfc) || empty($request->rfc)){
             return new ApiResponseData(
                     success:false,
                     message:'RFC no recibido'
                 );
         }
-        $data = $this->clienteService->getByRfc($rfc);
+        $data = $this->clienteService->getByRfc($request->rfc);
         if(!$data){
             return new ApiResponseData(
                     success:false,

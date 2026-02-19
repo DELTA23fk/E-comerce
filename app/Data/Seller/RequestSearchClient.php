@@ -16,9 +16,9 @@ class RequestSearchClient extends Data
      */
     public function __construct(
         #[Sometimes,Digits(10),Exists('clientes','telefono')]
-        public string $telefono,
+        public ?string $telefono,
         #[Sometimes,Max(13),Min(12),Exists('clientes','rfc')]
-        public string $rfc
+        public ?string $rfc
     )
     {}
 }
