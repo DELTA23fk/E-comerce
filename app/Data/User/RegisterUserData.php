@@ -37,6 +37,9 @@ class RegisterUserData extends Data
             'email.unique' => 'El correo electrónico ya está en uso por otro usuario.',
             'password.password' => 'La contraseña no cumple con los requisitos de seguridad.',
             'password.confirmed' => 'La confirmación de la contraseña no coincide.',
+            'name.required' => 'El nombre es requerido',
+            'email.required' => 'El email es requerido',
+            'password.required' => 'El password es requerido'
         ];
     }
 }

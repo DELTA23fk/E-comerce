@@ -2,7 +2,11 @@
 
 use App\Http\Controllers\Api\V1\Admin\ManagerUserController;
 use App\Http\Controllers\Api\V1\Auth\AuthController as ApiAuthController;
+use App\Http\Controllers\Api\V1\BrandController;
+use App\Http\Controllers\Api\V1\CategoryController;
 use App\Http\Controllers\Api\V1\Client\ClientController;
+use App\Http\Controllers\Api\V1\FamilyController;
+use App\Http\Controllers\Api\V1\GroupController;
 use App\Http\Controllers\Api\V1\Orders\OrderController;
 use App\Http\Controllers\Api\V1\Product\ProductCatalogController;
 use App\Http\Controllers\Api\V1\Product\ProductoController;
@@ -10,9 +14,9 @@ use App\Http\Controllers\Api\V1\Product\ProductOfferController;
 use App\Http\Controllers\Api\V1\Product\ProductProviderController;
 use App\Http\Controllers\Api\V1\Product\ProductSearchController;
 use App\Http\Controllers\Api\V1\Product\ProductStockController;
-use App\Http\Controllers\Api\V1\Shipment\ShipmentCvaController;
+use App\Http\Controllers\Api\V1\ProviderController;
+use App\Http\Controllers\Api\V1\Seller\SellerController;
 use App\Http\Controllers\Spa\Auth\AuthController as SpaAuthController;
-use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 
 Route::prefix('v1')->group(function () {
@@ -53,6 +57,69 @@ Route::prefix('v1')->group(function () {
             Route::get('/user/client/my',[ClientController::class,'getClientAuth'])->name('user.client.my');
             Route::put('/user/client/update/my',[ClientController::class,'update'])->name('user.client.update.my');
     
+        });
+
+        Route::prefix('categorias')->controller(CategoryController::class)->group(function () {
+            // --- CRUD principal -------------------------------------------
+            Route::get('/','index');                          
+            Route::get('/{id}','show');                           
+            // Route::post('/',   'store')->middleware('role:admin');                          
+            // Route::match(['put','patch'], '/{categoria}', 'update')->middleware('role:admin');
+            // Route::delete('/{categoria}', 'destroy')->middleware('role:admin');             
+
+            // --- Gestión de subcategorías -----------------------
+            // Route::prefix('/{categoria}/subcategorias')->group(function () {
+
+            //     // Agrega subcategorías sin quitar las que ya existen
+            //     Route::post('/attach',  'attachSubcategorias');
+
+            //     // Quita subcategorías específicas
+            //     Route::delete('/detach','detachSubcategorias');
+
+            //     // Reemplaza TODAS las subcategorías con el nuevo conjunto
+            //     Route::put('/sync','syncSubcategorias');
+            // })->middleware('role:admin');
+
+            // --- Caché ---------------------------------------------------
+            Route::post('/cache/refresh', 'refreshCache');        // POST   /api/categorias/cache/refresh
+        });
+
+        Route::prefix('familias')->controller(FamilyController::class)->group(function () {
+            Route::get('/','index');    
+            Route::get('/{id}','show');     
+            Route::post('/','store')->middleware('role:admin');    
+            // Route::match(['put','patch'],'/{familia}','update')->middleware('role:admin');  
+            // Route::delete('/{familia}',              'destroy')->middleware('role:admin');  
+            Route::post('/cache/refresh','refreshCache');
+        });
+
+        Route::prefix('grupos')->controller(GroupController::class)->group(function () {
+            Route::get('/','index');      
+            Route::get('/{id}','show');      
+            // Route::post('/',                       'store')->middleware('role:admin');     
+            // Route::match(['put','patch'],'/{grupo}','update')->middleware('role:admin');    
+            // Route::delete('/{grupo}',              'destroy')->middleware('role:admin');   
+            Route::post('/cache/refresh','refreshCache');
+        });
+
+        Route::prefix('marcas')->controller(BrandController::class)->group(function () {
+            Route::get('/','index');
+            Route::get('/{id}','show');
+            // Route::post('/',                       'store')->middleware('role:admin'); 
+            // Route::match(['put','patch'],'/{marca}','update')->middleware('role:admin');
+            // Route::delete('/{marca}',              'destroy')->middleware('role:admin');
+            Route::post('/cache/refresh','refreshCache');
+        });
+
+        Route::prefix('proveedores')->controller(ProviderController::class)->group(function () {
+            Route::get('/','index');        
+            Route::get('/codigo/{codigo}','showByCodigo');
+            Route::get('/{id}','show');
+            // Route::post('/','store')->middleware('role:admin');
+            // Route::match(['put','patch'],'/{proveedor}', 'update')->middleware('role:admin');
+            Route::patch('/{proveedor}/toggle-activo','toggleActivo')->middleware('role:admin');
+            // Route::delete('/{proveedor}',                'destroy')->middleware('role:admin'); 
+            Route::post('/cache/refresh','refreshCache');
         });
 
         Route::prefix('productos')->group(function(){
@@ -211,6 +278,13 @@ Route::prefix('v1')->group(function () {
                 ->name('usuarios.rol.update');
             Route::delete('usuarios/{usuarioId}/rol', [ManagerUserController::class, 'removeRole'])
                 ->name('usuarios.rol.destroy');
+        });
+
+        //vendedor
+        Route::prefix('vendedor')->controller(SellerController::class)->group(function(){
+            Route::post('registrar/cliente','RegistrarCliente');
+            Route::get('/obtener/cliente/telefono','obtenerClientePorTelefono');
+            Route::get('/obtener/cliente/rfc','obtenerClientePorRfc');
         });
 
         //COTIZAR PEDIDOS
