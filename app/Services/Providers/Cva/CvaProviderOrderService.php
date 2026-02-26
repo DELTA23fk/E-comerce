@@ -1,6 +1,6 @@
 <?php
 
-namespace App\Services\Providers;
+namespace App\Services\Providers\Cva;
 
 use App\Contratos\ProveedorServiceInterface;
 use App\Data\Pedidos\CotizacionEnvioData;
@@ -17,7 +17,7 @@ use App\Models\ProveedorEstado;
 use App\Models\ProveedorProducto;
 use App\Repository\CvaRepository;
 
-class CvaProviderService implements ProveedorServiceInterface
+class CvaProviderOrderService implements ProveedorServiceInterface
 {
     private int $CLAVE_CEDIS_GDL = 46;
     private int $CLAVE_SUCURSAL_GDL = 1;

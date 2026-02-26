@@ -16,10 +16,12 @@ return new class extends Migration
             $table->string('codigo_proveedor',10)->unique();
             $table->string('nombre',50);
             $table->boolean('activo')->default(true);
+            $table->integer('porcentaje_utilidad')->default(0)->nullable();
             $table->softDeletes();
             $table->timestamps();
 
             $table->index('codigo_proveedor');
+            $table->index('porcentaje_utilidad');
 
         });
     }

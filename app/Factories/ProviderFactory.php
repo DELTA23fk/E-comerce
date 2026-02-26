@@ -3,7 +3,7 @@
 namespace App\Factories;
 
 use App\Contratos\ProveedorServiceInterface;
-use App\Services\Providers\CvaProviderService;
+use App\Services\Providers\Cva\CvaProviderOrderService;
 use InvalidArgumentException;
 
 class ProviderFactory
@@ -11,7 +11,7 @@ class ProviderFactory
    private array $servicios = [];
 
     public function __construct(
-        CvaProviderService $cvaService,
+        CvaProviderOrderService $cvaService,
         // Inyectar más servicios aquí
     ) {
         $this->servicios = [

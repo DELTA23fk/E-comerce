@@ -71,7 +71,8 @@ class ProductService
 
         //ACTUALIZAR AUTOMÁTICAMENTE si se solicitan proveedores
         if ($incluyeProveedores) {
-            $this->realtimeUpdateService->actualizarTodosLosProveedoresConThrottling($id);
+            $logs = $this->realtimeUpdateService->actualizarTodosLosProveedoresConThrottling($id);
+            \Log::info("[ProductService] Actualizacion estatus del producto: omitidos: {$logs['omitidos']}");
         }
 
         $query = $this->productBaseBuilder();

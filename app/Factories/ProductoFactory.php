@@ -59,7 +59,7 @@ class ProductoFactory
             marcaNombre: self::sanitizeString($articulo->marca ?? 'General'),
             proveedorProductoId: (string) $articulo->id,
             proveedorProductoCodigo: self::sanitizeString($articulo->clave),
-            moneda: self::normalizeCurrency($articulo->moneda ?? 'Pesos'),
+            moneda: self::normalizeCurrency($articulo->moneda ?? null),
             stock: $articulo->disponible,
             stockCD: $articulo->disponibleCD,
             enOferta: $hasPromotion,

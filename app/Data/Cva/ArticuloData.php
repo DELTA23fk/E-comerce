@@ -22,7 +22,7 @@ class ArticuloData extends Data
         public int $disponible,
         public string $marca,
         public string $garantia,
-        public string $moneda,
+        public ?string $moneda,
         public string $precio,
         public ?string $imagen,
         public ?array $imagenes,

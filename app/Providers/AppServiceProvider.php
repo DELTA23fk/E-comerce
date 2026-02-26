@@ -11,6 +11,9 @@ use App\Services\ProductResponseService;
 use App\Services\ProductSearchService;
 use App\Services\ProductService;
 use App\Services\ProductStockService;
+use App\Services\Providers\Cva\CvaSyncService;
+use App\Services\Sync\ProductoPersistenceService;
+use App\Services\Sync\ProductoSyncOrchestrator;
 use Illuminate\Support\ServiceProvider;
 
 class AppServiceProvider extends ServiceProvider
@@ -32,6 +35,17 @@ class AppServiceProvider extends ServiceProvider
         $this->app->singleton(ProductProviderService::class);
         $this->app->singleton(ProductStockService::class);
         $this->app->singleton(ProductOfferService::class);
+
+        $this->app->singleton(ProductoPersistenceService::class);
+
+        $this->app->singleton(ProductoSyncOrchestrator::class, function ($app) {
+            return new ProductoSyncOrchestrator(
+                persistencia: $app->make(ProductoPersistenceService::class),
+                proveedores: [
+                    $app->make(CvaSyncService::class),
+                ],
+            );
+        });
     }
 
     /**
