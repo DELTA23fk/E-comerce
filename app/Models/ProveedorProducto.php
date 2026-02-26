@@ -33,7 +33,7 @@ class ProveedorProducto extends Model
             'stock_cd' => 'integer',
             'moneda' => 'string',
             'garantia' => 'string',
-            'ultima_actualizacion' => 'datetime:d-m-Y H:i:s',
+            'ultima_actualizacion' => 'datetime',
             'proveedor_id' => 'integer',
             'producto_id' => 'integer',
             'en_oferta' => 'boolean'

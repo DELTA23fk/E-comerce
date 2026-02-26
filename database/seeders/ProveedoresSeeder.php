@@ -16,11 +16,8 @@ class ProveedoresSeeder extends Seeder
             [
                 'nombre' => 'CVA',
                 'codigo_proveedor' => 'cva',
-            ],
-            [
-                'nombre' => 'Exel',
-                'codigo_proveedor' => 'exel',
-            ],
+                'porcentaje_utilidad' => 16
+            ]
         ]);
     }
 }
