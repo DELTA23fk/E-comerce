@@ -41,10 +41,13 @@ class ProductProviderService
         }
 
         // Siempre incluir la relación del proveedor específico
-        $builder->with(['proveedorProductos' => function ($q) use ($proveedorId) {
-            $q->where('proveedor_id', $proveedorId)
-                ->with(['proveedor', 'pricio', 'promociones']);
-        }]);
+        $builder->with([
+            'proveedorProductos' => function ($q) use ($proveedorId) {
+                $q->where('proveedor_id', $proveedorId)
+                    ->whereHas('proveedor', fn($q) => $q->where('activo', true))
+                    ->with(['proveedor', 'pricio', 'promociones']);
+            }
+        ]);
 
         $perPage = min(max((int)$request->get('per_page', 15), 1), 100);
         
@@ -59,7 +62,7 @@ class ProductProviderService
      */
     public function compararPrecios(int $productoId): Collection
     {
-        $this->realtimeUpdateService->actualizarTodosLosProveedores($productoId);
+        $this->realtimeUpdateService->actualizarTodosLosProveedoresConThrottling($productoId);
 
         $producto = Producto::with([
             'proveedorProductos.proveedor',
@@ -94,13 +97,13 @@ class ProductProviderService
      */
     public function obtenerMejorPrecio(int $productoId): ?array
     {
-        $this->realtimeUpdateService->actualizarTodosLosProveedores($productoId);
+        $this->realtimeUpdateService->actualizarTodosLosProveedoresConThrottling($productoId);
 
         $comparacion = $this->compararPrecios($productoId);
         
         // Filtrar solo proveedores con stock
         $conStock = $comparacion->filter(function ($item) {
-            return $item['stock'] > 0 || $item['stock_cd'] > 0 && $item['precio_actual'] !== null;
+            return ($item['stock'] > 0 || $item['stock_cd'] > 0) && $item['precio_actual'] !== null;
         });
 
         if ($conStock->isEmpty()) {
@@ -155,7 +158,7 @@ class ProductProviderService
      */
     public function obtenerProveedoresPorProducto(int $productoId): Collection
     {
-        $this->realtimeUpdateService->actualizarTodosLosProveedores($productoId);
+        $this->realtimeUpdateService->actualizarTodosLosProveedoresConThrottling($productoId);
 
         return ProveedorProducto::with(['proveedor', 'pricio' => function ($q) {
             $q->latest('ultima_actualizacion')->limit(1);

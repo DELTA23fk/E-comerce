@@ -109,8 +109,7 @@ class ProductService
 
 
             foreach($productos as $item){
-                $this->realtimeUpdateService->actualizarTodosLosProveedores($item->id);
-                // Recargar el producto con las relaciones actualizadas
+                $this->realtimeUpdateService->actualizarTodosLosProveedoresConThrottling($item->id);
                 $item->refresh();
                 if (!empty($relations)) {
                     $item->load($relations);
@@ -146,7 +145,7 @@ class ProductService
                                  $request->boolean('include_promociones');
 
             if ($incluyeProveedores) {
-                $this->realtimeUpdateService->actualizarTodosLosProveedores($producto->id);
+            $this->realtimeUpdateService->actualizarTodosLosProveedoresConThrottling($producto->id);
                 $producto->refresh();
                 if (!empty($relations)) {
                     $producto->load($relations);
@@ -173,7 +172,7 @@ class ProductService
 
          $producto = $query->first();
 
-        // ✅ ACTUALIZAR AUTOMÁTICAMENTE si el producto existe y se solicitan proveedores
+        // ACTUALIZAR AUTOMÁTICAMENTE si el producto existe y se solicitan proveedores
         if ($producto) {
             $incluyeProveedores = $request->boolean('include_proveedores') || 
                                  $request->boolean('include_proveedor_detalle') ||
@@ -181,7 +180,7 @@ class ProductService
                                  $request->boolean('include_promociones');
 
             if ($incluyeProveedores) {
-                $this->realtimeUpdateService->actualizarTodosLosProveedores($producto->id);
+                $this->realtimeUpdateService->actualizarTodosLosProveedoresConThrottling($producto->id);
                 $producto->refresh();
                 if (!empty($relations)) {
                     $producto->load($relations);
