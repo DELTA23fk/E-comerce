@@ -8,10 +8,14 @@ use Illuminate\Console\Command;
 /**
  * Actualización síncrona de catálogo sin uso de Jobs ni Queue.
  *
+ * Todos los métodos de actualización paginan externamente:
+ * el orquestador persiste cada página antes de pedir la siguiente,
+ * manteniendo la memoria acotada independientemente del tamaño del catálogo.
+ *
  * IMPORTANTE SOBRE EL MODO 'todo':
- * Este comando delega directamente a orquestador->syncTodo() que internamente
- * decide si usar 1 llamada HTTP (proveedor con consulta unificada, ej. CVA)
- * o 3 llamadas separadas (proveedor con endpoints distintos, ej. Exel).
+ * Delega a orquestador->syncTodo() que internamente decide la estrategia:
+ *   Proveedor UNIFICADO (ej. CVA) → 1 HTTP por página, 3 tipos por ciclo
+ *   Proveedor SEPARADO (ej. Exel) → 3 loops de paginación independientes
  * El comando no necesita saber cuál estrategia se usa.
  *
  * Uso:
@@ -58,8 +62,8 @@ class ActualizarCatalogoSyncCommand extends Command
 
         $esUnificado = $orquestador->proveedorSoportaConsultaUnificada($clave);
         $modoHttp    = $tipo === 'todo'
-            ? ($esUnificado ? '1 recorrido HTTP (unificado) por pagina' : '3 llamadas HTTP (separadas) por pagina')
-            : '1 llamada HTTP';
+            ? ($esUnificado ? '1 HTTP por página (unificado)' : '3 loops independientes (separado)')
+            : '1 loop de paginación';
 
         $this->newLine();
         $this->info("╔═══════════════════════════════════════════════════════════╗");
@@ -69,12 +73,7 @@ class ActualizarCatalogoSyncCommand extends Command
         $this->line("  🔌 Proveedor : " . strtoupper($clave));
         $this->line("  🔄 Tipo      : " . strtoupper($tipo));
         $this->line("  🌐 HTTP      : {$modoHttp}");
-        $this->line("  ⚙️  Modo      : Síncrono (proceso actual)");
-
-        if (!empty($filtros)) {
-            $this->line("  📋 Filtros   : " . collect($filtros)->map(fn($v, $k) => "{$k}={$v}")->implode(', '));
-        }
-
+        $this->line("  ⚙️  Modo      : Síncrono (proceso actual, paginación externa)");
         $this->newLine();
 
         // ── Ejecución ─────────────────────────────────────────────────────────
@@ -100,15 +99,24 @@ class ActualizarCatalogoSyncCommand extends Command
 
         foreach ($stats as $tipoStats => $datos) {
             $this->info("  📊 " . strtoupper($tipoStats));
-            $filas = collect($datos)
-                ->except(['duracion_s', 'proveedor'])
+
+            // Separar métricas de negocio de campos de contexto
+            $metricas = collect($datos)
+                ->except(['duracion_s', 'proveedor', 'paginas'])
                 ->map(fn($v, $k) => [$k, $v])
                 ->values()
                 ->toArray();
-            $this->table(['Métrica', 'Valor'], $filas);
-            if (isset($datos['duracion_s'])) {
-                $this->line("  ⏱️  Tiempo: {$datos['duracion_s']}s");
+
+            $this->table(['Métrica', 'Valor'], $metricas);
+
+            // Mostrar páginas y tiempo como líneas separadas
+            if (isset($datos['paginas'])) {
+                $this->line("  📄 Páginas procesadas : {$datos['paginas']}");
             }
+            if (isset($datos['duracion_s'])) {
+                $this->line("  ⏱️  Tiempo            : {$datos['duracion_s']}s");
+            }
+
             $this->newLine();
         }
 
@@ -124,11 +132,9 @@ class ActualizarCatalogoSyncCommand extends Command
 
     private function ejecutarPrecios(ProductoSyncOrchestrator $orquestador, string $clave): array
     {
-        $this->info("  ▶ Actualizando precios...");
+        $this->info("  ▶ Actualizando precios (paginando externamente)...");
         $inicio = microtime(true);
 
-        // El orquestador decide internamente si usar consulta unificada o endpoint
-        // específico según soportaConsultaUnificada() del proveedor
         $stats               = $orquestador->syncPrecios($clave);
         $stats['duracion_s'] = round(microtime(true) - $inicio, 2);
 
@@ -139,7 +145,7 @@ class ActualizarCatalogoSyncCommand extends Command
 
     private function ejecutarStock(ProductoSyncOrchestrator $orquestador, string $clave): array
     {
-        $this->info("  ▶ Actualizando stock...");
+        $this->info("  ▶ Actualizando stock (paginando externamente)...");
         $inicio = microtime(true);
 
         $stats               = $orquestador->syncStock($clave);
@@ -152,7 +158,7 @@ class ActualizarCatalogoSyncCommand extends Command
 
     private function ejecutarPromociones(ProductoSyncOrchestrator $orquestador, string $clave): array
     {
-        $this->info("  ▶ Actualizando promociones...");
+        $this->info("  ▶ Actualizando promociones (paginando externamente)...");
         $inicio = microtime(true);
 
         $stats               = $orquestador->syncPromociones($clave);
@@ -164,33 +170,30 @@ class ActualizarCatalogoSyncCommand extends Command
     }
 
     /**
-     * Delega a syncTodo() que internamente decide la estrategia:
+     * Delega a syncTodo() — la estrategia HTTP la decide el orquestador:
      *
      * Proveedor UNIFICADO (ej. CVA):
-     *   → obtenerProductosParaActualizacion() — 1 recorrido HTTP
-     *   → actualizarPrecios() + actualizarStock() + actualizarPromociones()
-     *     con la misma colección
+     *   Por cada página: 1 HTTP → misma Collection pasa a precios + stock + promos
      *
      * Proveedor SEPARADO (ej. Exel):
-     *   → obtenerProductosConPrecioActualizado() — 1 HTTP
-     *   → obtenerProductosConStockActualizado()  — 1 HTTP
-     *   → obtenerProductosEnPromocion()           — 1 HTTP
+     *   3 loops de paginación independientes, uno por tipo
      */
     private function ejecutarTodo(ProductoSyncOrchestrator $orquestador, string $clave): array
     {
-        $this->info("  ▶ Actualizando todo (precio + stock + promociones)...");
+        $this->info("  ▶ Actualizando todo (precio + stock + promociones, paginando externamente)...");
         $inicio = microtime(true);
 
-        // syncTodo maneja la optimización internamente
+        // syncTodo devuelve ['precios' => [...], 'stock' => [...], 'promociones' => [...]]
+        // cada sub-array ya trae 'paginas' y 'proveedor' incluidos
         $resultado = $orquestador->syncTodo($clave);
 
         $duracionTotal = round(microtime(true) - $inicio, 2);
 
-        // Agregar duración individual a cada sección para el resumen
-        foreach ($resultado as $tipo => &$stats) {
-            $stats['duracion_s'] = $stats['duracion_s'] ?? '-';
-            $this->mostrarStatsLinea(array_merge($stats, ['tipo' => $tipo]));
+        foreach ($resultado as $tipo => &$datos) {
+            $datos['duracion_s'] = '-'; // duración individual no disponible en modo todo
+            $this->mostrarStatsLinea(array_merge($datos, ['tipo' => $tipo]));
         }
+        unset($datos);
 
         $this->line("  ⏱️  Total: {$duracionTotal}s");
 
@@ -204,11 +207,13 @@ class ActualizarCatalogoSyncCommand extends Command
     private function mostrarStatsLinea(array $stats): void
     {
         $partes = collect($stats)
-            ->except(['duracion_s', 'proveedor', 'tipo'])
+            ->except(['duracion_s', 'proveedor', 'paginas', 'tipo'])
             ->map(fn($v, $k) => "{$k}: {$v}")
             ->implode(' | ');
 
+        $paginas  = isset($stats['paginas'])    ? " | páginas: {$stats['paginas']}" : '';
         $duracion = $stats['duracion_s'] ?? '-';
-        $this->line("    {$partes} | ⏱️ {$duracion}s");
+
+        $this->line("    {$partes}{$paginas} | ⏱️ {$duracion}s");
     }
 }

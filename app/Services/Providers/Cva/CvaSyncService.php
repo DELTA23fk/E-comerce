@@ -16,21 +16,24 @@ use Illuminate\Support\Facades\Log;
  * Responsabilidades:
  *  - Llamar al CvaRepository con el método correcto según el caso de uso
  *  - Transformar ArticuloData → ProductoData vía ProductoFactory
- *  - Manejar la paginación internamente en los métodos de actualización
+ *  - Devolver UNA página por llamada — el orquestador controla el loop
  *  - NO decide qué filtros HTTP usar (responsabilidad del Repository)
  *  - NO persiste nada en BD (responsabilidad del Orquestador)
  *
- * ─── DOS MÉTODOS DE PAGINACIÓN INTERNOS ──────────────────────────────────────
+ * ─── DOS ENDPOINTS ────────────────────────────────────────────────────────────
  *
- *  paginarSyncInicial($filtros)  → getProductsGeneral()          (datos completos)
- *  paginarActualizacion()        → getProductosParaActualizacion() (datos ligeros)
+ *  obtenerPaginaDeProductos()         → 'general'       (datos completos)
+ *  obtenerProductosParaActualizacion() → 'actualizacion' (datos ligeros)
  *
  * El sync inicial usa el endpoint con imágenes, descripciones técnicas, etc.
  * Las actualizaciones usan el endpoint mínimo: solo precio + stock + promos.
+ *
+ * CVA no tiene endpoints separados por tipo — el mismo endpoint ligero
+ * sirve para precio, stock y promociones simultáneamente.
  */
 class CvaSyncService implements ProveedorSyncInterface
 {
-     public function __construct(
+    public function __construct(
         private readonly CvaRepository $api,
     ) {}
 
@@ -44,13 +47,12 @@ class CvaSyncService implements ProveedorSyncInterface
     }
 
     // =========================================================================
-    // SYNC INICIAL — paginación externa, filtros desde Command
+    // SYNC INICIAL — paginación externa
     // =========================================================================
 
     /**
      * Una página del catálogo completo para sync inicial.
      * El orquestador controla el loop de páginas desde afuera.
-     * Los filtros vienen del Command y el Repository los fusiona con los base.
      */
     public function obtenerPaginaDeProductos(array $filtros = [], int $pagina = 1): SyncPageResult
     {
@@ -60,8 +62,8 @@ class CvaSyncService implements ProveedorSyncInterface
             return SyncPageResult::vacio($pagina);
         }
 
-        $productos     = $this->transformarArticulos($respuesta->articulos, 'sync inicial');
-        $totalPaginas  = $respuesta->paginacion->totalPaginas ?? 1;
+        $productos    = $this->transformarArticulos($respuesta->articulos, "sync inicial pág. {$pagina}");
+        $totalPaginas = $respuesta->paginacion->totalPaginas ?? 1;
 
         return new SyncPageResult(
             productos: $productos,
@@ -74,7 +76,6 @@ class CvaSyncService implements ProveedorSyncInterface
 
     /**
      * Producto individual por clave. Usado para webhooks y tiempo real.
-     * Los filtros necesarios están encapsulados en el Repository.
      */
     public function obtenerProductoPorId(string $clave): ?ProductoData
     {
@@ -84,13 +85,13 @@ class CvaSyncService implements ProveedorSyncInterface
     }
 
     // =========================================================================
-    // CONSULTA UNIFICADA — paginación interna, sin filtros externos
+    // ACTUALIZACIONES — CONSULTA UNIFICADA
     // =========================================================================
 
     /**
-     * CVA devuelve precio + stock + promos en el mismo endpoint.
-     * El orquestador llama a obtenerProductosParaActualizacion() UNA sola vez
-     * y pasa la colección a los tres métodos de persistencia.
+     * CVA devuelve precio + stock + promos en el mismo endpoint ligero.
+     * El orquestador llama a obtenerProductosParaActualizacion() en loop
+     * y pasa cada página a los tres métodos de persistencia.
      */
     public function soportaConsultaUnificada(): bool
     {
@@ -98,86 +99,69 @@ class CvaSyncService implements ProveedorSyncInterface
     }
 
     /**
-     * Todos los productos con precio, stock y datos de promoción.
-     * Usa el endpoint LIGERO de actualizaciones (sin imágenes ni dt).
-     * Pagina internamente — el orquestador solo recibe la Collection final.
+     * Una página de productos con precio, stock y datos de promoción.
+     * Usa el endpoint LIGERO (sin imágenes ni descripción técnica).
+     * El orquestador controla el loop — aquí solo se devuelve una página.
      */
-    public function obtenerProductosParaActualizacion(): Collection
+    public function obtenerProductosParaActualizacion(int $pagina = 1): SyncPageResult
     {
-        return $this->paginarActualizacion();
+        $respuesta = $this->api->obtenerProductosPara('actualizacion', $pagina);
+
+        if ($respuesta->articulos->count() === 0) {
+            return SyncPageResult::vacio($pagina);
+        }
+
+        $productos    = $this->transformarArticulos($respuesta->articulos, "actualización pág. {$pagina}");
+        $totalPaginas = $respuesta->paginacion->totalPaginas ?? 1;
+
+        Log::info('[CVA] Página de actualización obtenida', [
+            'pagina'    => $pagina,
+            'de'        => $totalPaginas,
+            'productos' => $productos->count(),
+        ]);
+
+        return new SyncPageResult(
+            productos: $productos,
+            paginaActual: $pagina,
+            totalPaginas: $totalPaginas,
+            hayMasPaginas: $pagina < $totalPaginas,
+            totalProductos: $respuesta->paginacion->totalArticulos ?? 0,
+        );
     }
 
     // =========================================================================
-    // CONSULTAS SEPARADAS
-    // CVA no tiene endpoints separados — todos reutilizan paginarActualizacion().
-    // El orquestador solo llama a estos métodos cuando soportaConsultaUnificada()
-    // = false, pero los dejamos implementados por consistencia con la interfaz.
+    // ACTUALIZACIONES — CONSULTA SEPARADA (no aplica para CVA)
+    // CVA usa un solo endpoint para precio + stock + promos.
+    // Estos métodos no deben llamarse cuando soportaConsultaUnificada() = true.
     // =========================================================================
 
-    public function obtenerProductosConPrecioActualizado(): Collection
+    /** @throws \BadMethodCallException */
+    public function obtenerProductosConPrecioActualizado(int $pagina = 1): SyncPageResult
     {
-        return $this->paginarActualizacion();
+        throw new \BadMethodCallException(
+            static::class . ' usa consulta unificada. Llamar obtenerProductosParaActualizacion().'
+        );
     }
 
-    public function obtenerProductosConStockActualizado(): Collection
+    /** @throws \BadMethodCallException */
+    public function obtenerProductosConStockActualizado(int $pagina = 1): SyncPageResult
     {
-        return $this->paginarActualizacion();
+        throw new \BadMethodCallException(
+            static::class . ' usa consulta unificada. Llamar obtenerProductosParaActualizacion().'
+        );
     }
 
-    public function obtenerProductosEnPromocion(): Collection
+    /** @throws \BadMethodCallException */
+    public function obtenerProductosEnPromocion(int $pagina = 1): SyncPageResult
     {
-        return $this->paginarActualizacion()
-            ->filter(fn(ProductoData $dto) => $dto->esOferta)
-            ->values();
+        throw new \BadMethodCallException(
+            static::class . ' usa consulta unificada. Llamar obtenerProductosParaActualizacion().'
+        );
     }
 
     // =========================================================================
     // HELPERS INTERNOS
     // =========================================================================
-
-    /**
-     * Paginación para ACTUALIZACIONES.
-     * Usa getProductosParaActualizacion() → endpoint ligero (sin imágenes ni dt).
-     * Sin filtros externos — el Repository encapsula los necesarios.
-     */
-    private function paginarActualizacion(): Collection
-    {
-        $todos        = collect();
-        $pagina       = 1;
-        $totalPaginas = null; // Se fija en la primera respuesta y no cambia
-
-        do {
-            $respuesta = $this->api->obtenerProductosPara('actualizacion', $pagina);
-
-            if ($respuesta->articulos->count() === 0) break;
-
-            // Fijar el total solo en la primera página
-            if ($totalPaginas === null) {
-                $totalPaginas = $respuesta->paginacion->totalPaginas ?? 1;
-            }
-
-            $todos = $todos->merge(
-                $this->transformarArticulos($respuesta->articulos, "actualización pág. {$pagina}")
-            );
-
-            Log::info('[CVA] Página de actualización cargada', [
-                'pagina'    => $pagina,
-                'de'        => $totalPaginas,
-                'productos' => $respuesta->articulos->count(),
-                'acumulado' => $todos->count(),
-            ]);
-
-            $pagina++;
-
-            // Pausa entre peticiones para no sobrecargar la API de CVA
-            if ($pagina <= $totalPaginas) {
-                sleep(1);
-            }
-
-        } while ($pagina <= $totalPaginas);
-
-        return $todos;
-    }
 
     /**
      * Transforma una colección de ArticuloData → ProductoData.

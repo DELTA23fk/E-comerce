@@ -15,7 +15,7 @@ class ActualizarCatalogoJob implements ShouldQueue, ShouldBeUnique
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    public int $timeout = 3600;
+    public int $timeout = 7200;
     public int $tries   = 3;
     public int $backoff = 60;
 
