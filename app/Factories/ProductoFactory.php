@@ -47,8 +47,8 @@ class ProductoFactory
 
         return new ProductoData(
             nombre: self::sanitizeString($articulo->descripcion),
-            descripcion: self::sanitizeString($articulo->descripcion ?? 'Sin descripción'),
-            descripcionTecnica: 'Sin descripcion tecnica', // CVA no tiene este campo
+            descripcion: self::sanitizeString($articulo->fichaComercial),
+            descripcionTecnica: self::sanitizeString($articulo->fichaTecnica),
             codigoFabricante: self::sanitizeString($articulo->codigoFabricante),
             codigoBarras: null, // CVA no tiene código de barras
             upc: self::sanitizeString($articulo->upc),

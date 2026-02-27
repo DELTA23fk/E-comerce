@@ -166,7 +166,7 @@ class ProductFilterService
     private function filtrarPorRangoPrecios(Builder $query, Request $request): void
     {
         if ($request->filled('precio_min') || $request->filled('precio_max')) {
-            $query->whereHas('proveedorProductos.pricios', function ($q) use ($request) {
+            $query->whereHas('proveedorProductos.pricio', function ($q) use ($request) {
                 if ($request->filled('precio_min')) {
                     $q->where('precio_actual', '>=', $request->precio_min);
                 }

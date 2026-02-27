@@ -32,7 +32,7 @@ class ProductOfferService
             'proveedorProductos' => function ($q) {
                 $q->whereHas('proveedor', fn($q) => $q->where('activo', true))
                   ->where('en_oferta', true)
-                  ->with(['proveedor', 'pricios', 'promociones']);
+                  ->with(['proveedor', 'pricio', 'promociones']);
             }
         ]);
 

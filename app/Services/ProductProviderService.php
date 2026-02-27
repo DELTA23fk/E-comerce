@@ -72,7 +72,7 @@ class ProductProviderService
         ])->findOrFail($productoId);
 
         return $producto->proveedorProductos->map(function ($proveedorProducto) {
-            $precioActual = $proveedorProducto->pricios->first();
+            $precioActual = $proveedorProducto->pricio->first();
             
             return [
                 'proveedor_id' => $proveedorProducto->proveedor_id,
@@ -166,7 +166,7 @@ class ProductProviderService
             ->where('producto_id', $productoId)
             ->get()
             ->map(function ($proveedorProducto) {
-                $precioActual = $proveedorProducto->pricios->first();
+                $precioActual = $proveedorProducto->pricio->first();
                 
                 return [
                     'proveedor_producto_id' => $proveedorProducto->id,

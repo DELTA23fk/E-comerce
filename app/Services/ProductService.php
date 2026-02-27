@@ -200,7 +200,7 @@ class ProductService
 
 
         if ($min !== null || $max !== null) {
-            $query->whereHas('proveedorProductos.pricios', function ($q) use ($min, $max) {
+            $query->whereHas('proveedorProductos.pricio', function ($q) use ($min, $max) {
                 if ($min !== null) {
                     $q->where('precio_actual', '>=', $min);
                 }

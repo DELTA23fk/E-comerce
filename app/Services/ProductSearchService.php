@@ -137,7 +137,7 @@ class ProductSearchService
 
         // Rango de precios
         if (!empty($criterios['precio_min']) || !empty($criterios['precio_max'])) {
-            $builder->whereHas('proveedorProductos.pricios', function ($q) use ($criterios) {
+            $builder->whereHas('proveedorProductos.pricio', function ($q) use ($criterios) {
                 if (!empty($criterios['precio_min'])) {
                     $q->where('precio_actual', '>=', $criterios['precio_min']);
                 }

@@ -17,6 +17,8 @@ class ArticuloData extends Data
         public ?string $upc,
         public string $codigoFabricante,
         public string $descripcion,
+        public ?string $fichaTecnica,
+        public ?string $fichaComercial,
         public string $principal,
         public string $grupo,
         public int $disponible,
