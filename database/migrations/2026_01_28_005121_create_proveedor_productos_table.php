@@ -17,7 +17,6 @@ return new class extends Migration
             $table->string('codigo_proveedor')->unique();
             $table->integer('stock');
             $table->integer('stock_cd');
-            $table->string('moneda');
             $table->string('garantia');
             $table->boolean('en_oferta')->default(false);
             $table->dateTime('ultima_actualizacion');
