@@ -2,56 +2,59 @@
 
 namespace App\Data\Producto;
 
+use App\Data\Producto\AlmacenStockData;
+
 readonly class ProductoData
 {
-    // CLASE ESTANDAR PARA LA CREACION DE PRODUTOS Y SUS RELACIONES
+    /**
+     * @param PromocionData[]    $promociones
+     * @param AlmacenStockData[] $almacenes
+     */
     public function __construct(
-         // Datos básicos de 'products'
-        public string $nombre,
-        public string $descripcion,
+        // ── Datos básicos — productos ─────────────────────────────────────────
+        public string  $nombre,
+        public ?string $descripcion,
         public ?string $descripcionTecnica,
         public ?string $codigoFabricante,
         public ?string $codigoBarras,
         public ?string $upc,
-        
-        // Relaciones (nombres para buscar IDs después)
+
+        // ── Relaciones (nombres para resolver IDs) ────────────────────────────
         public ?string $categoriaNombre,
         public ?string $subcategoriaNombre,
         public ?string $familiaNombre,
         public ?string $grupoNombre,
         public ?string $marcaNombre,
 
-        // Datos para 'provider_products'
-        public  string $proveedorProductoId, // El 'id' que viene de la API
-        public  string $proveedorProductoCodigo, // El 'sku' o 'clave'
-        public  string $moneda,
-        public  int $stock,
-        public  ?int $stockCD,
-        public  bool $enOferta,
-        public  ?string $garantia,
-        
-       // NOTA: uso de string para presicion de precios , se hace uso de bcadd
-        // Datos para 'provider_product_prices'
-        public  string $precioActual, 
-        public  ?string $precioAnterior = null,
+        // ── Datos para proveedor_productos ────────────────────────────────────
+        public string  $proveedorProductoId,     // id que viene de la API
+        public string  $proveedorProductoCodigo, // sku / clave
+        public int     $stockTotal,                   // resumen total (suma de almacenes)
+        public bool    $enOferta,
+        public ?string $garantia,
 
-        // Imágenes
-        public  array $imagenes = [],
+        // ── Datos para proveedor_producto_precios ─────────────────────────────
+        // Se usa string para precisión bcmath
+        public string  $moneda,                         // moneda de venta final (siempre MXN)
+        public ?string $precioActual               = null, // null si precio inválido
+        public ?string $precioAnterior             = null,
+        public ?string $precioBaseProducto         = null, // null si precio inválido
+        public ?string $monedaBaseProducto         = null, // moneda original del proveedor
+        public ?string $precioRecomendadoProveedor = null,
+        public ?int    $porcentajeUtilidadAplicado = null,
+        public ?string $tipoCambioUsadoMxn         = null, // null si precio ya venía en MXN
 
-        // Promociones
-        public ?string $descuentoTotal = null,
-        public ?string $descuentoMoneda = null,
-        public ?string $descuentoPrecio = null,
-        public ?string $descuentoPrecioMoneda = null,
-        public ?string $clavePromocion = null,
-        public ?string $promocionDescripcion = null,
-        public ?string $promocionExpiracion = null,
-        public ?int $disponiblesEnPromocion = null,
-        public ?string $ofertaPrecio = null,
-        public ?string $precioRegular = null,
-        public bool $esOferta = false
-    )
-    {
-        
-    }
+        // ── Imágenes ──────────────────────────────────────────────────────────
+        public array $imagenes = [],
+
+        // ── Promociones ───────────────────────────────────────────────────────
+        public array $promociones = [],
+
+        // ── Almacenes ─────────────────────────────────────────────────────────
+        // Detalle de stock por almacén/sucursal.
+        // Vacío para proveedores que no proveen estructura de warehouses (Exel).
+        // CVA: todas las sucursales + garantizados GDL (1) y CEDIS GDL (46).
+        // Ingram N1: availabilityByWarehouse[].
+        public array $almacenes = [],
+    ) {}
 }

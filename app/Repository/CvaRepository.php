@@ -10,6 +10,7 @@ use App\Exceptions\Cva\CvaTokenException;
 use App\Models\Proveedor;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 
 /**
  * Repository de comunicación HTTP con la API de CVA.
@@ -44,6 +45,7 @@ class CvaRepository
         'MonedaPesos' => 'true',
         'upc'         => 'true',
         'completos'   => '1',
+        'sucursales' => 'true', // incluye datos de sucursales para stock
     ];
 
     // ─── Filtros para sync inicial: catálogo completo con todos los datos ─────
@@ -264,6 +266,15 @@ class CvaRepository
         if ($response->failed()) {
             throw new CvaApiException(
                 "Error al obtener datos de CVA [{$endpoint}]",
+                $response->status(),
+                $response->json()
+            );
+        }
+
+        if ($response->serverError()) {
+            $message = $response->json('message') ?? 'Error del servidor CVA';
+            throw new CvaApiException(
+                "CVA server error [{$endpoint}]: {$message}",
                 $response->status(),
                 $response->json()
             );

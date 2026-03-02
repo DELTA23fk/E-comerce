@@ -40,5 +40,9 @@ return [
         'client_id' => env('CVA_CLIENT_ID'),
         'client_secret' => env('CVA_CLIENT_SECRET'),
     ],
+    'exchangerate' => [
+        'url' => env('EXCHANGERATE_API_URL'),
+        'key' => env('EXCHANGERATE_API_KEY'),
+    ],
 
 ];

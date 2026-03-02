@@ -77,7 +77,7 @@ class ProductRelationService
         // Sub-relaciones de proveedor
         $nestedRelationsMap = [
             'include_proveedor_detalle' => 'proveedor',
-            'include_precios' => 'pricio',
+            'include_precios' => 'precio',
             'include_promociones' => 'promociones',
         ];
 

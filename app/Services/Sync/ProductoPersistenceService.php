@@ -2,7 +2,9 @@
 
 namespace App\Services\Sync;
 
+use App\Data\Producto\AlmacenStockData;
 use App\Data\Producto\ProductoData;
+use App\Data\Producto\PromocionData;
 use App\Models\Categoria;
 use App\Models\Familia;
 use App\Models\Grupo;
@@ -15,30 +17,6 @@ use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
-/**
- * Servicio de Persistencia de Productos.
- *
- * Centraliza TODA la lógica de escritura en base de datos.
- * Es completamente agnóstico al proveedor: solo recibe ProductoData.
- *
- * Métodos públicos disponibles:
- *  - persistirBatch()              → Sync inicial (crea/actualiza todo)
- *  - actualizarPrecios()           → Solo precios
- *  - actualizarStock()             → Solo stock
- *  - actualizarPromociones()       → Solo promociones
- *  - persistirProductoIndividual() → Un único producto completo
- *
- * CORRECCIONES APLICADAS:
- *  - [PROMO]  Condición de entrada unificada entre batch e individual (esOferta || descuentoTotal !== null)
- *  - [PROMO]  promocionHaCambiado() maneja nulls correctamente y compara campos adicionales
- *  - [PROMO]  construirDatosPromocion() incluye updated_at
- *  - [PROMO]  Stats expiradas separadas: expiradas_reemplazadas vs expiradas_sin_oferta
- *  - [PRECIO] Comparación numérica explícita con (float) en vez de !=
- *  - [STOCK]  Comparación numérica explícita con (int) en vez de !=
- *  - [STOCK]  upsert masivo reemplazado por UPDATE directo para no sobreescribir campos ajenos
- *  - [STOCK]  buscarProveedorProducto sin lock reemplazado por versión con lock en batch
- *  - [BATCH]  N+1 queries eliminados en insertarPreciosIniciales e insertarPromocionesIniciales
- */
 class ProductoPersistenceService
 {
     // -------------------------------------------------------------------------
@@ -67,17 +45,9 @@ class ProductoPersistenceService
     // API PÚBLICA
     // =========================================================================
 
-    /**
-     * Sync inicial: inserta/actualiza productos, precios, stock, imágenes y promociones.
-     *
-     * @param  array<ProductoData>  $productosDto
-     * @param  int                  $proveedorIdBd  ID del proveedor en tabla `proveedores`
-     */
     public function persistirBatch(array $productosDto, int $proveedorIdBd): void
     {
-        if (empty($productosDto)) {
-            return;
-        }
+        if (empty($productosDto)) return;
 
         $this->ejecutarConReintentos(function () use ($productosDto, $proveedorIdBd) {
             DB::transaction(function () use ($productosDto, $proveedorIdBd) {
@@ -91,15 +61,14 @@ class ProductoPersistenceService
                 $this->insertarPreciosIniciales($dtosValidos, $productos, $proveedorProductos);
                 $this->upsertImagenes($dtosValidos, $productos);
                 $this->insertarPromocionesIniciales($dtosValidos, $productos, $proveedorProductos);
+
+                // Almacenes: resolver maestros + upsert stock en una sola pasada
+                $this->upsertAlmacenesBatch($dtosValidos, $productos, $proveedorProductos, $proveedorIdBd);
+
             }, attempts: 5);
         });
     }
 
-    /**
-     * Actualiza solo precios de una colección de productos normalizados.
-     *
-     * @param  Collection<ProductoData>  $productos
-     */
     public function actualizarPrecios(Collection $productos, int $proveedorIdBd): array
     {
         $stats = ['total' => 0, 'actualizados' => 0, 'sin_cambios' => 0, 'errores' => 0];
@@ -116,11 +85,6 @@ class ProductoPersistenceService
         return $stats;
     }
 
-    /**
-     * Actualiza solo stock de una colección de productos normalizados.
-     *
-     * @param  Collection<ProductoData>  $productos
-     */
     public function actualizarStock(Collection $productos, int $proveedorIdBd): array
     {
         $stats = ['total' => 0, 'actualizados' => 0, 'sin_cambios' => 0, 'errores' => 0];
@@ -137,21 +101,16 @@ class ProductoPersistenceService
         return $stats;
     }
 
-    /**
-     * Actualiza solo promociones de una colección de productos normalizados.
-     *
-     * @param  Collection<ProductoData>  $productos
-     */
     public function actualizarPromociones(Collection $productos, int $proveedorIdBd): array
     {
         $stats = [
-            'total'                => 0,
-            'creadas'              => 0,
-            'stock_actualizado'    => 0,
-            'sin_cambios'          => 0,
-            'expiradas_reemplazadas' => 0,  // FIX: separado de expiradas_sin_oferta
-            'expiradas_sin_oferta' => 0,
-            'errores'              => 0,
+            'total'                  => 0,
+            'creadas'                => 0,
+            'stock_actualizado'      => 0,
+            'sin_cambios'            => 0,
+            'expiradas_reemplazadas' => 0,
+            'expiradas_sin_oferta'   => 0,
+            'errores'                => 0,
         ];
 
         foreach ($productos->chunk(self::BATCH_SIZE) as $chunk) {
@@ -167,8 +126,27 @@ class ProductoPersistenceService
     }
 
     /**
-     * Sincronización completa de un único ProductoData.
+     * Actualización paginada de stock por almacén.
+     * Llamado desde el orquestador igual que actualizarStock().
+     *
+     * @return array{total: int, actualizados: int, sin_cambios: int, errores: int}
      */
+    public function actualizarAlmacenes(Collection $productos, int $proveedorIdBd): array
+    {
+        $stats = ['total' => 0, 'actualizados' => 0, 'sin_cambios' => 0, 'errores' => 0];
+
+        foreach ($productos->chunk(self::BATCH_SIZE) as $chunk) {
+            $resultado = $this->ejecutarConReintentos(
+                fn() => $this->actualizarAlmacenesBatch($chunk, $proveedorIdBd),
+                self::MAX_RETRIES,
+                fn($e) => $this->errorBatchStats($e, 'actualizarAlmacenes', $stats)
+            );
+            $this->sumarStats($stats, $resultado);
+        }
+
+        return $stats;
+    }
+
     public function persistirProductoIndividual(ProductoData $dto, int $proveedorIdBd): array
     {
         return $this->ejecutarConReintentos(function () use ($dto, $proveedorIdBd) {
@@ -176,9 +154,12 @@ class ProductoPersistenceService
                 $this->asegurarDatosMaestrosExisten([$dto]);
                 $producto          = $this->buscarOCrearProductoConBloqueo($dto);
                 $proveedorProducto = $this->buscarOCrearProveedorProductoConBloqueo($dto, $producto->id, $proveedorIdBd);
+
                 $this->actualizarPrecioIndividualConBloqueo($dto, $proveedorProducto->id);
                 $this->actualizarStockIndividualConBloqueo($dto, $proveedorProducto->id);
                 $this->actualizarPromocionIndividualConBloqueo($dto, $proveedorProducto->id);
+                $this->actualizarAlmacenesIndividual($dto, $proveedorProducto->id, $proveedorIdBd);
+
             }, attempts: 5);
 
             return ['exito' => true];
@@ -186,7 +167,511 @@ class ProductoPersistenceService
     }
 
     // =========================================================================
-    // PERSISTENCIA INTERNA - BATCH
+    // ALMACENES — MAESTROS
+    // =========================================================================
+
+    /**
+     * Asegura que los almacenes maestros del proveedor existen en BD.
+     * Devuelve mapa: nombre → almacen_id
+     *
+     * Estrategia:
+     *   1. Deduplicar por nombre (un batch puede traer el mismo almacén N veces)
+     *   2. insertOrIgnore — no sobreescribe metadatos ya guardados
+     *   3. SELECT para obtener IDs de todos (nuevos + existentes)
+     *
+     * Los metadatos (CP, es_cd, es_principal) solo se escriben en la
+     * inserción inicial; el sync nunca los sobreescribe.
+     */
+    protected function resolverAlmacenesMaestros(array $almacenesData, int $proveedorId): array
+    {
+        if (empty($almacenesData)) return [];
+
+        // Deduplicar por nombre para evitar intentar insertar duplicados en el mismo batch
+        $filasPorNombre = [];
+        foreach ($almacenesData as $a) {
+            if (isset($filasPorNombre[$a->almacenNombre])) continue;
+
+            $filasPorNombre[$a->almacenNombre] = [
+                'proveedor_id'       => $proveedorId,
+                'almacen_id_externo' => $a->almacenIdExterno,
+                'nombre'             => $a->almacenNombre,
+                'codigo_postal'      => $a->codigoPostal,
+                'es_principal'       => $a->esPrincipal  ? 1 : 0,
+                'es_cd'              => $a->esCd         ? 1 : 0,
+                'created_at'         => now(),
+                'updated_at'         => now(),
+            ];
+        }
+
+        DB::table('proveedor_almacenes')->insertOrIgnore(array_values($filasPorNombre));
+
+        return DB::table('proveedor_almacenes')
+            ->where('proveedor_id', $proveedorId)
+            ->whereIn('nombre', array_keys($filasPorNombre))
+            ->pluck('id', 'nombre')
+            ->toArray();
+    }
+
+    // =========================================================================
+    // ALMACENES — UPSERT EN BATCH (persistirBatch)
+    // =========================================================================
+
+    /**
+     * Upsert masivo de stock por almacén — llamado al final de persistirBatch().
+     * Resuelve todos los almacenes del batch en una sola operación antes del upsert.
+     */
+    protected function upsertAlmacenesBatch(
+        array      $dtosValidos,
+        Collection $productos,
+        Collection $proveedorProductos,
+        int        $proveedorId
+    ): void {
+        // Recolectar todos los AlmacenStockData únicos del batch
+        $todosAlmacenes = [];
+        foreach ($dtosValidos as $dto) {
+            foreach ($dto->almacenes as $a) {
+                $todosAlmacenes[$a->almacenNombre] = $a;
+            }
+        }
+
+        if (empty($todosAlmacenes)) return;
+
+        // Resolver/crear maestros de golpe — una sola operación para todo el batch
+        $almacenMap = $this->resolverAlmacenesMaestros(
+            array_values($todosAlmacenes),
+            $proveedorId
+        );
+
+        $filas = [];
+
+        foreach ($dtosValidos as $dto) {
+            if (empty($dto->almacenes)) continue;
+
+            $producto = $productos[$this->claveUnica($dto)] ?? null;
+            if (!$producto) continue;
+
+            $pp = $proveedorProductos->firstWhere('producto_id', $producto->id);
+            if (!$pp) continue;
+
+            foreach ($dto->almacenes as $almacen) {
+                $almacenId = $almacenMap[$almacen->almacenNombre] ?? null;
+                if (!$almacenId) continue;
+
+                $filas[] = $this->stockAFila($almacenId, $pp->id, $almacen);
+            }
+        }
+
+        if (!empty($filas)) {
+            DB::table('almacen_producto_stock')->upsert(
+                $filas,
+                ['proveedor_almacen_id', 'proveedor_producto_id'],
+                ['cantidad', 'backorder', 'eta_backorder', 'ultima_actualizacion', 'updated_at']
+            );
+        }
+    }
+
+    // =========================================================================
+    // ALMACENES — ACTUALIZACIÓN PAGINADA (actualizarAlmacenes)
+    // =========================================================================
+
+    /**
+     * Procesa un chunk de DTOs y actualiza el stock por almacén.
+     * Los maestros se resuelven una vez por chunk, no por producto.
+     */
+    protected function actualizarAlmacenesBatch(Collection $chunk, int $proveedorIdBd): array
+    {
+        $stats = ['total' => 0, 'actualizados' => 0, 'sin_cambios' => 0, 'errores' => 0];
+
+        // Resolver maestros ANTES de la transacción — evita queries repetidas en el loop
+        $todosAlmacenes = $chunk
+            ->flatMap(fn($dto) => $dto->almacenes)
+            ->keyBy(fn($a) => $a->almacenNombre)
+            ->values()
+            ->all();
+
+        if (empty($todosAlmacenes)) return $stats;
+
+        $almacenMap = $this->resolverAlmacenesMaestros($todosAlmacenes, $proveedorIdBd);
+
+        DB::transaction(function () use ($chunk, $proveedorIdBd, $almacenMap, &$stats) {
+
+            foreach ($chunk as $dto) {
+                try {
+                    $stats['total']++;
+
+                    if (empty($dto->almacenes)) {
+                        $stats['sin_cambios']++;
+                        continue;
+                    }
+
+                    $pp = $this->buscarProveedorProductoConBloqueo($dto, $proveedorIdBd);
+                    if (!$pp) {
+                        $stats['errores']++;
+                        continue;
+                    }
+
+                    $filas = [];
+                    foreach ($dto->almacenes as $almacen) {
+                        $almacenId = $almacenMap[$almacen->almacenNombre] ?? null;
+                        if (!$almacenId) continue;
+
+                        $filas[] = $this->stockAFila($almacenId, $pp->id, $almacen);
+                    }
+
+                    if (empty($filas)) {
+                        $stats['sin_cambios']++;
+                        continue;
+                    }
+
+                    DB::table('almacen_producto_stock')->upsert(
+                        $filas,
+                        ['proveedor_almacen_id', 'proveedor_producto_id'],
+                        ['cantidad', 'backorder', 'eta_backorder', 'ultima_actualizacion', 'updated_at']
+                    );
+
+                    $stats['actualizados']++;
+
+                } catch (\Throwable $e) {
+                    Log::error('[Persistencia] Error actualizando stock de almacén', [
+                        'codigo' => $dto->proveedorProductoCodigo ?? null,
+                        'error'  => $e->getMessage(),
+                    ]);
+                    $stats['errores']++;
+                }
+            }
+        }, attempts: 5);
+
+        return $stats;
+    }
+
+    // =========================================================================
+    // ALMACENES — INDIVIDUAL (persistirProductoIndividual)
+    // =========================================================================
+
+    protected function actualizarAlmacenesIndividual(
+        ProductoData $dto,
+        int          $ppId,
+        int          $proveedorId
+    ): void {
+        if (empty($dto->almacenes)) return;
+
+        $almacenMap = $this->resolverAlmacenesMaestros($dto->almacenes, $proveedorId);
+
+        $filas = [];
+        foreach ($dto->almacenes as $almacen) {
+            $almacenId = $almacenMap[$almacen->almacenNombre] ?? null;
+            if (!$almacenId) continue;
+
+            $filas[] = $this->stockAFila($almacenId, $ppId,$almacen);
+        }
+
+        if (!empty($filas)) {
+            DB::table('almacen_producto_stock')->upsert(
+                $filas,
+                ['proveedor_almacen_id', 'proveedor_producto_id'],
+                ['cantidad', 'backorder', 'eta_backorder', 'ultima_actualizacion', 'updated_at']
+            );
+        }
+    }
+
+    // =========================================================================
+    // ALMACENES — HELPER
+    // =========================================================================
+
+    private function stockAFila(int $almacenId, int $ppId, AlmacenStockData $almacen): array
+    {
+        return [
+            'proveedor_almacen_id' => $almacenId,
+            'proveedor_producto_id' => $ppId,
+            'cantidad'              => $almacen->cantidad,
+            'backorder'             => $almacen->backorder,
+            'eta_backorder'         => $almacen->etaBackorder,
+            'ultima_actualizacion'  => now(),
+            'created_at'            => now(),
+            'updated_at'            => now(),
+        ];
+    }
+
+    // =========================================================================
+    // PROMOCIONES
+    // =========================================================================
+
+    protected function actualizarPromocionesBatch(Collection $chunk, int $proveedorIdBd): array
+    {
+        $stats = [
+            'total'                  => 0,
+            'creadas'                => 0,
+            'stock_actualizado'      => 0,
+            'sin_cambios'            => 0,
+            'expiradas_reemplazadas' => 0,
+            'expiradas_sin_oferta'   => 0,
+            'errores'                => 0,
+        ];
+
+        DB::transaction(function () use ($chunk, $proveedorIdBd, &$stats) {
+            foreach ($chunk as $dto) {
+                try {
+                    $stats['total']++;
+                    $pp = $this->buscarProveedorProductoConBloqueo($dto, $proveedorIdBd);
+                    if (!$pp) { $stats['errores']++; continue; }
+
+                    if (!$this->tienePromocion($dto)) {
+                        $expiradas = DB::table('proveedor_producto_promociones')
+                            ->where('proveedor_producto_id', $pp->id)
+                            ->where('es_oferta', true)
+                            ->count();
+
+                        if ($expiradas > 0) {
+                            DB::table('proveedor_producto_promociones')
+                                ->where('proveedor_producto_id', $pp->id)
+                                ->where('es_oferta', true)
+                                ->update(['es_oferta' => false, 'updated_at' => now()]);
+
+                            DB::table('proveedor_productos')
+                                ->where('id', $pp->id)
+                                ->update(['en_oferta' => false]);
+
+                            $stats['expiradas_sin_oferta']++;
+                        } else {
+                            $stats['sin_cambios']++;
+                        }
+                        continue;
+                    }
+
+                    $filas           = $this->construirFilasPromocion($dto, $pp->id);
+                    $clavesEntrantes = array_column($filas, 'clave_promocion');
+
+                    $expiradas = DB::table('proveedor_producto_promociones')
+                        ->where('proveedor_producto_id', $pp->id)
+                        ->where('es_oferta', true)
+                        ->when(
+                            !empty($clavesEntrantes),
+                            fn($q) => $q->whereNotIn('clave_promocion', $clavesEntrantes)
+                        )
+                        ->count();
+
+                    if ($expiradas > 0) {
+                        DB::table('proveedor_producto_promociones')
+                            ->where('proveedor_producto_id', $pp->id)
+                            ->where('es_oferta', true)
+                            ->whereNotIn('clave_promocion', $clavesEntrantes)
+                            ->update(['es_oferta' => false, 'updated_at' => now()]);
+
+                        $stats['expiradas_reemplazadas'] += $expiradas;
+                    }
+
+                    foreach ($filas as $nuevaFila) {
+                        $ultima = DB::table('proveedor_producto_promociones')
+                            ->where('proveedor_producto_id', $pp->id)
+                            ->where('clave_promocion', $nuevaFila['clave_promocion'])
+                            ->orderBy('id', 'desc')
+                            ->lockForUpdate()
+                            ->first();
+
+                        if (!$ultima) {
+                            DB::table('proveedor_producto_promociones')->insert($nuevaFila);
+                            $stats['creadas']++;
+                        } elseif ($this->promocionHaCambiado($ultima, $nuevaFila)) {
+                            DB::table('proveedor_producto_promociones')
+                                ->where('id', $ultima->id)
+                                ->update(['es_oferta' => false, 'updated_at' => now()]);
+
+                            DB::table('proveedor_producto_promociones')->insert($nuevaFila);
+                            $stats['creadas']++;
+                            $stats['expiradas_reemplazadas']++;
+                        } else {
+                            DB::table('proveedor_producto_promociones')
+                                ->where('id', $ultima->id)
+                                ->update($this->camposActualizablesPromocion($nuevaFila));
+
+                            $stats['stock_actualizado']++;
+                        }
+                    }
+
+                    DB::table('proveedor_productos')
+                        ->where('id', $pp->id)
+                        ->update(['en_oferta' => true]);
+
+                } catch (\Throwable $e) {
+                    Log::error('[Persistencia] Error procesando promoción', ['error' => $e->getMessage()]);
+                    $stats['errores']++;
+                }
+            }
+        }, attempts: 5);
+
+        return $stats;
+    }
+
+    protected function actualizarPromocionIndividualConBloqueo(ProductoData $dto, int $ppId): void
+    {
+        if (!$this->tienePromocion($dto)) {
+            DB::table('proveedor_producto_promociones')
+                ->where('proveedor_producto_id', $ppId)
+                ->where('es_oferta', true)
+                ->update(['es_oferta' => false, 'updated_at' => now()]);
+
+            ProveedorProducto::where('id', $ppId)->update(['en_oferta' => false]);
+            return;
+        }
+
+        $filas           = $this->construirFilasPromocion($dto, $ppId);
+        $clavesEntrantes = array_column($filas, 'clave_promocion');
+
+        DB::table('proveedor_producto_promociones')
+            ->where('proveedor_producto_id', $ppId)
+            ->where('es_oferta', true)
+            ->when(
+                !empty($clavesEntrantes),
+                fn($q) => $q->whereNotIn('clave_promocion', $clavesEntrantes)
+            )
+            ->update(['es_oferta' => false, 'updated_at' => now()]);
+
+        foreach ($filas as $nuevaFila) {
+            $ultima = DB::table('proveedor_producto_promociones')
+                ->where('proveedor_producto_id', $ppId)
+                ->where('clave_promocion', $nuevaFila['clave_promocion'])
+                ->orderBy('id', 'desc')
+                ->lockForUpdate()
+                ->first();
+
+            if (!$ultima) {
+                DB::table('proveedor_producto_promociones')->insert($nuevaFila);
+            } elseif ($this->promocionHaCambiado($ultima, $nuevaFila)) {
+                DB::table('proveedor_producto_promociones')
+                    ->where('id', $ultima->id)
+                    ->update(['es_oferta' => false, 'updated_at' => now()]);
+
+                DB::table('proveedor_producto_promociones')->insert($nuevaFila);
+            } else {
+                DB::table('proveedor_producto_promociones')
+                    ->where('id', $ultima->id)
+                    ->update($this->camposActualizablesPromocion($nuevaFila));
+            }
+        }
+
+        ProveedorProducto::where('id', $ppId)->update(['en_oferta' => true]);
+    }
+
+    protected function insertarPromocionesIniciales(
+        array      $dtosValidos,
+        Collection $productos,
+        Collection $proveedorProductos
+    ): void {
+        $filas = [];
+
+        foreach ($dtosValidos as $dto) {
+            if (!$this->tienePromocion($dto)) continue;
+
+            $producto = $productos[$this->claveUnica($dto)] ?? null;
+            if (!$producto) continue;
+
+            $pp = $proveedorProductos->firstWhere('producto_id', $producto->id);
+            if (!$pp) continue;
+
+            foreach ($this->construirFilasPromocion($dto, $pp->id) as $fila) {
+                if (empty($fila['clave_promocion'])) {
+                    $fila['clave_promocion'] = 'PROMO-' . $pp->id . '-' . md5(
+                        ($fila['descripcion_promocion'] ?? '') . uniqid()
+                    );
+                }
+                $filas[] = $fila;
+            }
+        }
+
+        if (!empty($filas)) {
+            DB::table('proveedor_producto_promociones')->upsert(
+                $filas,
+                ['proveedor_producto_id', 'clave_promocion'],
+                [
+                    'total_descuento', 'moneda_descuento', 'tipo_descuento',
+                    'moneda_precio_original', 'precio_con_descuento', 'precio_con_descuento_mxn',
+                    'tipo_cambio_usado', 'descripcion_promocion',
+                    'fecha_inicio', 'expiracion_fecha', 'expiracion_texto',
+                    'cantidad_minima', 'disponible_en_promocion',
+                    'precio_regular', 'es_oferta', 'updated_at',
+                ]
+            );
+        }
+    }
+
+    // =========================================================================
+    // HELPERS DE PROMOCIONES
+    // =========================================================================
+
+    protected function tienePromocion(ProductoData $dto): bool
+    {
+        return !empty($dto->promociones);
+    }
+
+    protected function construirFilasPromocion(ProductoData $dto, int $ppId): array
+    {
+        return array_map(
+            fn(PromocionData $promo) => $this->promocionAFila($promo, $ppId),
+            $dto->promociones
+        );
+    }
+
+    protected function promocionAFila(PromocionData $promo, int $ppId): array
+    {
+        return [
+            'proveedor_producto_id'    => $ppId,
+            'total_descuento'          => $promo->totalDescuento,
+            'moneda_descuento'         => $promo->monedaDescuento,
+            'tipo_descuento'           => $promo->tipoDescuento,
+            'moneda_precio_original'   => $promo->monedaPrecioOriginal,
+            'precio_con_descuento'     => $promo->precioConDescuento,
+            'precio_con_descuento_mxn' => $promo->precioConDescuentoMxn,
+            'tipo_cambio_usado'        => $promo->tipoCambioUsado,
+            'clave_promocion'          => $promo->clavePromocion,
+            'descripcion_promocion'    => $promo->descripcionPromocion,
+            'fecha_inicio'             => $promo->fechaInicio,
+            'expiracion_fecha'         => $promo->expiracionFecha,
+            'expiracion_texto'         => $promo->expiracionTexto,
+            'cantidad_minima'          => $promo->cantidadMinima,
+            'disponible_en_promocion'  => $promo->disponibleEnPromocion,
+            'precio_regular'           => $promo->precioRegular,
+            'es_oferta'                => $promo->esOferta,
+            'created_at'               => now(),
+            'updated_at'               => now(),
+        ];
+    }
+
+    protected function camposActualizablesPromocion(array $fila): array
+    {
+        return [
+            'total_descuento'          => $fila['total_descuento'],
+            'precio_con_descuento'     => $fila['precio_con_descuento'],
+            'precio_con_descuento_mxn' => $fila['precio_con_descuento_mxn'],
+            'tipo_cambio_usado'        => $fila['tipo_cambio_usado'],
+            'disponible_en_promocion'  => $fila['disponible_en_promocion'],
+            'precio_regular'           => $fila['precio_regular'],
+            'expiracion_fecha'         => $fila['expiracion_fecha'],
+            'expiracion_texto'         => $fila['expiracion_texto'],
+            'updated_at'               => now(),
+        ];
+    }
+
+    protected function promocionHaCambiado($ultima, array $nuevaFila): bool
+    {
+        if ($ultima->clave_promocion === null || $nuevaFila['clave_promocion'] === null) {
+            return true;
+        }
+
+        if ($ultima->clave_promocion !== $nuevaFila['clave_promocion']) {
+            return true;
+        }
+
+        foreach (['descripcion_promocion', 'moneda_precio_original', 'tipo_descuento', 'fecha_inicio'] as $campo) {
+            if ($ultima->{$campo} !== $nuevaFila[$campo]) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    // =========================================================================
+    // PRECIOS
     // =========================================================================
 
     protected function actualizarPreciosBatch(Collection $chunk, int $proveedorIdBd): array
@@ -216,34 +701,34 @@ class ProductoPersistenceService
                         ->lockForUpdate()
                         ->first();
 
-                    // FIX: comparación numérica explícita para evitar falsas igualdades por tipo
-                    $precioActualBd  = $registro ? (float) $registro->precio_actual : null;
-                    $precioNuevo     = (float) $dto->precioActual;
-                    $precioHaCambiado = $precioActualBd === null || $precioActualBd !== $precioNuevo;
+                    if (!$registro || $this->precioHaCambiado($registro, $dto)) {
+                        if ($registro) {
+                            $actualizacion = array_merge(
+                                ['precio_anterior' => $registro->precio_actual],
+                                $this->datosPrecioDesdeDto($dto),
+                                ['ultima_actualizacion' => now(), 'updated_at' => now()]
+                            );
 
-                    if (!$registro || $precioHaCambiado) {
-                        $registro
-                            ? DB::table('proveedor_producto_precios')
+                            DB::table('proveedor_producto_precios')
                                 ->where('proveedor_producto_id', $pp->id)
-                                ->update([
-                                    'precio_anterior'      => $registro->precio_actual,
-                                    'precio_actual'        => $dto->precioActual,
-                                    'ultima_actualizacion' => now(),
-                                    'updated_at'           => now(),
-                                ])
-                            : DB::table('proveedor_producto_precios')->insert([
+                                ->update($actualizacion);
+                        } else {
+                            $fila = array_merge($this->datosPrecioDesdeDto($dto), [
                                 'proveedor_producto_id' => $pp->id,
-                                'precio_actual'         => $dto->precioActual,
                                 'precio_anterior'       => null,
                                 'ultima_actualizacion'  => now(),
                                 'created_at'            => now(),
                                 'updated_at'            => now(),
                             ]);
 
+                            DB::table('proveedor_producto_precios')->insert($fila);
+                        }
+
                         $stats['actualizados']++;
                     } else {
                         $stats['sin_cambios']++;
                     }
+
                 } catch (\Throwable $e) {
                     Log::error('[Persistencia] Error actualizando precio', ['error' => $e->getMessage()]);
                     $stats['errores']++;
@@ -252,250 +737,6 @@ class ProductoPersistenceService
         }, attempts: 5);
 
         return $stats;
-    }
-
-    protected function actualizarStockBatch(Collection $chunk, int $proveedorIdBd): array
-    {
-        $stats = ['total' => 0, 'actualizados' => 0, 'sin_cambios' => 0, 'errores' => 0];
-
-        DB::transaction(function () use ($chunk, $proveedorIdBd, &$stats) {
-            $ids          = [];
-            $stockData    = []; // FIX: solo guardamos los valores nuevos de stock, no la fila completa
-
-            foreach ($chunk as $dto) {
-                try {
-                    $stats['total']++;
-
-                    // FIX: usar lock desde la lectura para que la decisión de cambio sea consistente
-                    $pp = $this->buscarProveedorProductoConBloqueo($dto, $proveedorIdBd);
-
-                    if (!$pp) { $stats['errores']++; continue; }
-
-                    // FIX: comparación numérica explícita
-                    $stockHaCambiado = (int) $pp->stock !== (int) $dto->stock
-                        || (int) $pp->stock_cd !== (int) $dto->stockCD;
-
-                    if ($stockHaCambiado) {
-                        $ids[]             = $pp->id;
-                        $stockData[$pp->id] = [
-                            'stock'    => $dto->stock,
-                            'stock_cd' => $dto->stockCD,
-                        ];
-                        $stats['actualizados']++;
-                    } else {
-                        $stats['sin_cambios']++;
-                    }
-                } catch (\Throwable $e) {
-                    Log::error('[Persistencia] Error procesando stock', ['error' => $e->getMessage()]);
-                    $stats['errores']++;
-                }
-            }
-
-            if (!empty($ids)) {
-                // FIX: UPDATE directo con CASE/WHEN en vez de upsert completo,
-                // para no sobreescribir moneda, garantia, codigo_proveedor, etc.
-                $this->actualizarStockMasivo($ids, $stockData);
-            }
-        }, attempts: 5);
-
-        return $stats;
-    }
-
-    /**
-     * Ejecuta un UPDATE masivo de stock/stock_cd usando CASE WHEN,
-     * garantizando que solo se tocan esos dos campos.
-     *
-     * @param  int[]   $ids
-     * @param  array<int, array{stock: mixed, stock_cd: mixed}>  $stockData
-     */
-    protected function actualizarStockMasivo(array $ids, array $stockData): void
-    {
-        sort($ids); // ordenar para consistent locking y evitar deadlocks
-
-        $casesStock   = '';
-        $casesStockCd = '';
-        $bindings     = [];
-
-        foreach ($ids as $id) {
-            $casesStock   .= " WHEN ? THEN ?";
-            $casesStockCd .= " WHEN ? THEN ?";
-            $bindings[]    = $id;
-            $bindings[]    = $stockData[$id]['stock'];
-        }
-
-        // Bindings para el CASE de stock_cd
-        $bindingsStockCd = [];
-        foreach ($ids as $id) {
-            $bindingsStockCd[] = $id;
-            $bindingsStockCd[] = $stockData[$id]['stock_cd'];
-        }
-
-        $placeholders = implode(',', array_fill(0, count($ids), '?'));
-
-        DB::statement(
-            "UPDATE proveedor_productos
-             SET stock                = CASE id {$casesStock} END,
-                 stock_cd             = CASE id {$casesStockCd} END,
-                 ultima_actualizacion = NOW(),
-                 updated_at           = NOW()
-             WHERE id IN ({$placeholders})",
-            array_merge($bindings, $bindingsStockCd, $ids)
-        );
-    }
-
-    protected function actualizarPromocionesBatch(Collection $chunk, int $proveedorIdBd): array
-    {
-        $stats = [
-            'total'                  => 0,
-            'creadas'                => 0,
-            'stock_actualizado'      => 0,
-            'sin_cambios'            => 0,
-            'expiradas_reemplazadas' => 0, // FIX: antes "expiradas" mezclaba dos conceptos
-            'expiradas_sin_oferta'   => 0,
-            'errores'                => 0,
-        ];
-
-        DB::transaction(function () use ($chunk, $proveedorIdBd, &$stats) {
-            foreach ($chunk as $dto) {
-                try {
-                    $stats['total']++;
-                    $pp = $this->buscarProveedorProductoConBloqueo($dto, $proveedorIdBd);
-
-                    if (!$pp) { $stats['errores']++; continue; }
-
-                    $ultima = DB::table('proveedor_producto_promociones')
-                        ->where('proveedor_producto_id', $pp->id)
-                        ->orderBy('id', 'desc')
-                        ->lockForUpdate()
-                        ->first();
-
-                    // FIX: condición unificada con el método individual
-                    $tienePromocion = $dto->esOferta || $dto->descuentoTotal !== null;
-
-                    if ($tienePromocion) {
-                        $nueva = $this->construirDatosPromocion($dto, $pp->id);
-
-                        if (!$ultima || $this->promocionHaCambiado($ultima, $nueva)) {
-                            if ($ultima) {
-                                DB::table('proveedor_producto_promociones')
-                                    ->where('id', $ultima->id)
-                                    ->update(['es_oferta' => false, 'updated_at' => now()]);
-                                $stats['expiradas_reemplazadas']++; // FIX: stat diferenciado
-                            }
-                            DB::table('proveedor_producto_promociones')->insert($nueva);
-                            DB::table('proveedor_productos')->where('id', $pp->id)->update(['en_oferta' => true]);
-                            $stats['creadas']++;
-                        } else {
-                            // Misma promoción → solo actualizar stock y precios derivados
-                            DB::table('proveedor_producto_promociones')
-                                ->where('id', $ultima->id)
-                                ->update([
-                                    'total_descuento'         => $nueva['total_descuento'],
-                                    'precio_con_descuento'    => $nueva['precio_con_descuento'],
-                                    'precio_oferta'           => $nueva['precio_oferta'],
-                                    'precio_regular'          => $nueva['precio_regular'],
-                                    'disponible_en_promocion' => $nueva['disponible_en_promocion'],
-                                    'expiracion'              => $nueva['expiracion'],
-                                    'updated_at'              => now(),
-                                ]);
-                            $stats['stock_actualizado']++;
-                        }
-                    } elseif ($pp->en_oferta) {
-                        if ($ultima) {
-                            DB::table('proveedor_producto_promociones')
-                                ->where('id', $ultima->id)
-                                ->update(['es_oferta' => false, 'updated_at' => now()]);
-                        }
-                        DB::table('proveedor_productos')->where('id', $pp->id)->update(['en_oferta' => false]);
-                        $stats['expiradas_sin_oferta']++; // FIX: stat diferenciado
-                    } else {
-                        $stats['sin_cambios']++;
-                    }
-                } catch (\Throwable $e) {
-                    Log::error('[Persistencia] Error procesando promoción', ['error' => $e->getMessage()]);
-                    $stats['errores']++;
-                }
-            }
-        }, attempts: 5);
-
-        return $stats;
-    }
-
-    // =========================================================================
-    // PERSISTENCIA INTERNA - INDIVIDUAL CON BLOQUEO
-    // =========================================================================
-
-    /**
-     * Busca el producto base por UPC/código de barras.
-     * - Si NO existe → lo crea completo.
-     * - Si YA existe → solo rellena campos que estén NULL/vacíos.
-     *   Nunca sobreescribe datos que otro proveedor ya insertó.
-     */
-    protected function buscarOCrearProductoConBloqueo(ProductoData $dto): Producto
-    {
-        $clave   = $this->claveUnica($dto);
-        $producto = Producto::where('upc', $clave)->lockForUpdate()->first();
-
-        $grupoNombre = $this->procesarNombreGrupo($dto->grupoNombre);
-
-        $datos = [
-            'upc'                 => $clave,
-            'nombre'              => $dto->nombre,
-            'descripcion'         => $dto->descripcion,
-            'descripcion_tecnica' => $dto->descripcionTecnica,
-            'categoria_id'        => $this->cache['categorias'][$dto->categoriaNombre] ?? null,
-            'sub_categoria_id'    => $this->cache['subcategorias'][$dto->subcategoriaNombre ?? 'General'] ?? null,
-            'familia_id'          => $this->cache['familias'][$dto->familiaNombre ?? 'General'] ?? null,
-            'grupo_id'            => $this->cache['grupos'][$grupoNombre] ?? null,
-            'marca_id'            => $this->cache['marcas'][$dto->marcaNombre ?? 'General'] ?? null,
-            'codigo_fabricante'   => $dto->codigoFabricante,
-            'codigo_barras'       => $dto->codigoBarras,
-        ];
-
-        if (!$producto) {
-            return Producto::create($datos);
-        }
-
-        $camposRellenables = [
-            'nombre', 'descripcion', 'descripcion_tecnica',
-            'categoria_id', 'sub_categoria_id', 'familia_id',
-            'grupo_id', 'marca_id', 'codigo_fabricante', 'codigo_barras',
-        ];
-
-        $actualizaciones = [];
-        foreach ($camposRellenables as $campo) {
-            if (empty($producto->{$campo}) && !empty($datos[$campo])) {
-                $actualizaciones[$campo] = $datos[$campo];
-            }
-        }
-
-        if (!empty($actualizaciones)) {
-            $actualizaciones['updated_at'] = now();
-            $producto->update($actualizaciones);
-        }
-
-        return $producto->fresh();
-    }
-
-    protected function buscarOCrearProveedorProductoConBloqueo(ProductoData $dto, int $productoId, int $proveedorIdBd): ProveedorProducto
-    {
-        $pp = ProveedorProducto::where('proveedor_id', $proveedorIdBd)
-            ->where('producto_id', $productoId)
-            ->lockForUpdate()
-            ->first();
-
-        return $pp ?? ProveedorProducto::create([
-            'proveedor_id'          => $proveedorIdBd,
-            'producto_id'           => $productoId,
-            'proveedor_producto_id' => $dto->proveedorProductoId,
-            'codigo_proveedor'      => $dto->proveedorProductoCodigo,
-            'moneda'                => $dto->moneda,
-            'stock'                 => $dto->stock,
-            'stock_cd'              => $dto->stockCD,
-            'garantia'              => $dto->garantia,
-            'en_oferta'             => $dto->enOferta,
-            'ultima_actualizacion'  => now(),
-        ]);
     }
 
     protected function actualizarPrecioIndividualConBloqueo(ProductoData $dto, int $ppId): void
@@ -514,105 +755,116 @@ class ProductoPersistenceService
             ->lockForUpdate()
             ->first();
 
-        // FIX: comparación numérica explícita
-        $precioNuevo     = (float) $dto->precioActual;
-        $precioActualBd  = $registro ? (float) $registro->precio_actual : null;
-        $precioHaCambiado = $precioActualBd === null || $precioActualBd !== $precioNuevo;
-
-        if (!$registro) {
-            DB::table('proveedor_producto_precios')->insert([
-                'proveedor_producto_id' => $ppId,
-                'precio_actual'         => $dto->precioActual,
-                'precio_anterior'       => null,
-                'ultima_actualizacion'  => now(),
-                'created_at'            => now(),
-                'updated_at'            => now(),
-            ]);
-        } elseif ($precioHaCambiado) {
-            DB::table('proveedor_producto_precios')
-                ->where('proveedor_producto_id', $ppId)
-                ->update([
-                    'precio_anterior'      => $registro->precio_actual,
-                    'precio_actual'        => $dto->precioActual,
-                    'ultima_actualizacion' => now(),
-                    'updated_at'           => now(),
-                ]);
+        if (!$registro || $this->precioHaCambiado($registro, $dto)) {
+            if (!$registro) {
+                DB::table('proveedor_producto_precios')->insert(array_merge(
+                    $this->datosPrecioDesdeDto($dto),
+                    [
+                        'proveedor_producto_id' => $ppId,
+                        'precio_anterior'       => null,
+                        'ultima_actualizacion'  => now(),
+                        'created_at'            => now(),
+                        'updated_at'            => now(),
+                    ]
+                ));
+            } else {
+                DB::table('proveedor_producto_precios')
+                    ->where('proveedor_producto_id', $ppId)
+                    ->update(array_merge(
+                        ['precio_anterior' => $registro->precio_actual],
+                        $this->datosPrecioDesdeDto($dto),
+                        ['ultima_actualizacion' => now(), 'updated_at' => now()]
+                    ));
+            }
         }
+    }
+
+    // =========================================================================
+    // STOCK
+    // =========================================================================
+
+    protected function actualizarStockBatch(Collection $chunk, int $proveedorIdBd): array
+    {
+        $stats = ['total' => 0, 'actualizados' => 0, 'sin_cambios' => 0, 'errores' => 0];
+
+        DB::transaction(function () use ($chunk, $proveedorIdBd, &$stats) {
+            $ids       = [];
+            $stockData = [];
+
+            foreach ($chunk as $dto) {
+                try {
+                    $stats['total']++;
+                    $pp = $this->buscarProveedorProductoConBloqueo($dto, $proveedorIdBd);
+                    if (!$pp) { $stats['errores']++; continue; }
+
+                    $stockHaCambiado = (int) $pp->stock_total    !== (int) $dto->stockTotal;
+
+                    if ($stockHaCambiado) {
+                        $ids[]              = $pp->id;
+                        $stockData[$pp->id] = ['stock_total' => $dto->stockTotal];
+                        $stats['actualizados']++;
+                    } else {
+                        $stats['sin_cambios']++;
+                    }
+
+                } catch (\Throwable $e) {
+                    Log::error('[Persistencia] Error procesando stock', ['error' => $e->getMessage()]);
+                    $stats['errores']++;
+                }
+            }
+
+            if (!empty($ids)) {
+                $this->actualizarStockMasivo($ids, $stockData);
+            }
+        }, attempts: 5);
+
+        return $stats;
+    }
+
+    protected function actualizarStockMasivo(array $ids, array $stockData): void
+    {
+        sort($ids);
+
+        $cases    = '';
+        $bindings = [];
+
+        foreach ($ids as $id) {
+            $cases      .= " WHEN ? THEN ?";
+            $bindings[]  = $id;
+            $bindings[]  = $stockData[$id]['stock_total'];
+        }
+
+        $placeholders = implode(',', array_fill(0, count($ids), '?'));
+
+        DB::statement(
+            "UPDATE proveedor_productos
+            SET stock_total          = CASE id {$cases} END,
+                ultima_actualizacion = NOW(),
+                updated_at           = NOW()
+            WHERE id IN ({$placeholders})",
+            array_merge($bindings, $ids)
+        );
     }
 
     protected function actualizarStockIndividualConBloqueo(ProductoData $dto, int $ppId): void
     {
         $pp = ProveedorProducto::where('id', $ppId)->lockForUpdate()->first();
 
-        // FIX: comparación numérica explícita
-        if ($pp && ((int) $pp->stock !== (int) $dto->stock || (int) $pp->stock_cd !== (int) $dto->stockCD)) {
+        if ($pp && ((int) $pp->stock_total !== (int) $dto->stockTotal)) {
             $pp->update([
-                'stock'                => $dto->stock,
-                'stock_cd'             => $dto->stockCD,
+                'stock_total'                => $dto->stockTotal,
                 'ultima_actualizacion' => now(),
             ]);
         }
     }
 
-    protected function actualizarPromocionIndividualConBloqueo(ProductoData $dto, int $ppId): void
-    {
-        $ultima = DB::table('proveedor_producto_promociones')
-            ->where('proveedor_producto_id', $ppId)
-            ->orderBy('created_at', 'desc')
-            ->lockForUpdate()
-            ->first();
-
-        // FIX: condición unificada con el método batch
-        $tienePromocion = $dto->esOferta || $dto->descuentoTotal !== null;
-
-        if ($tienePromocion) {
-            $nueva = $this->construirDatosPromocion($dto, $ppId);
-
-            if (!$ultima || $this->promocionHaCambiado($ultima, $nueva)) {
-                if ($ultima) {
-                    DB::table('proveedor_producto_promociones')
-                        ->where('id', $ultima->id)
-                        ->update(['es_oferta' => false, 'updated_at' => now()]);
-                }
-                DB::table('proveedor_producto_promociones')->insert($nueva);
-                ProveedorProducto::where('id', $ppId)->update(['en_oferta' => true]);
-            } else {
-                // Misma promoción → actualizar solo stock y precios derivados
-                DB::table('proveedor_producto_promociones')
-                    ->where('id', $ultima->id)
-                    ->update([
-                        'total_descuento'         => $nueva['total_descuento'],
-                        'precio_con_descuento'    => $nueva['precio_con_descuento'],
-                        'precio_oferta'           => $nueva['precio_oferta'],
-                        'precio_regular'          => $nueva['precio_regular'],
-                        'disponible_en_promocion' => $nueva['disponible_en_promocion'],
-                        'expiracion'              => $nueva['expiracion'],
-                        'updated_at'              => now(),
-                    ]);
-            }
-        } elseif ($ultima) {
-            DB::table('proveedor_producto_promociones')
-                ->where('id', $ultima->id)
-                ->update(['es_oferta' => false, 'updated_at' => now()]);
-
-            ProveedorProducto::where('id', $ppId)->update(['en_oferta' => false]);
-        }
-    }
-
     // =========================================================================
-    // PERSISTENCIA INTERNA - UPSERT MASIVO
+    // PRODUCTOS Y PROVEEDOR_PRODUCTOS
     // =========================================================================
 
-    /**
-     * Persiste los productos base con estrategia "no sobreescribir":
-     * - Si el producto NO existe → insertOrIgnore (INSERT IGNORE en MySQL)
-     * - Si el producto YA existe → solo rellena campos que estén NULL/vacíos
-     */
     protected function upsertProductos(array $dtosValidos): Collection
     {
-        if (empty($dtosValidos)) {
-            return collect();
-        }
+        if (empty($dtosValidos)) return collect();
 
         $filas = [];
 
@@ -624,11 +876,11 @@ class ProductoPersistenceService
                 'nombre'              => $dto->nombre,
                 'descripcion'         => $dto->descripcion,
                 'descripcion_tecnica' => $dto->descripcionTecnica,
-                'categoria_id'        => $this->cache['categorias'][$dto->categoriaNombre] ?? null,
+                'categoria_id'        => $this->cache['categorias'][$dto->categoriaNombre]                    ?? null,
                 'sub_categoria_id'    => $this->cache['subcategorias'][$dto->subcategoriaNombre ?? 'General'] ?? null,
-                'familia_id'          => $this->cache['familias'][$dto->familiaNombre ?? 'General'] ?? null,
-                'grupo_id'            => $this->cache['grupos'][$grupoNombre] ?? null,
-                'marca_id'            => $this->cache['marcas'][$dto->marcaNombre ?? 'General'] ?? null,
+                'familia_id'          => $this->cache['familias'][$dto->familiaNombre           ?? 'General'] ?? null,
+                'grupo_id'            => $this->cache['grupos'][$grupoNombre]                                 ?? null,
+                'marca_id'            => $this->cache['marcas'][$dto->marcaNombre               ?? 'General'] ?? null,
                 'codigo_fabricante'   => $dto->codigoFabricante,
                 'codigo_barras'       => $dto->codigoBarras,
                 'updated_at'          => now(),
@@ -668,8 +920,11 @@ class ProductoPersistenceService
         return $productosActuales;
     }
 
-    protected function upsertProveedorProductos(array $dtosValidos, Collection $productos, int $proveedorIdBd): Collection
-    {
+    protected function upsertProveedorProductos(
+        array      $dtosValidos,
+        Collection $productos,
+        int        $proveedorIdBd
+    ): Collection {
         $filas = [];
 
         foreach ($dtosValidos as $dto) {
@@ -681,9 +936,7 @@ class ProductoPersistenceService
                 'producto_id'           => $producto->id,
                 'proveedor_producto_id' => $dto->proveedorProductoId,
                 'codigo_proveedor'      => $dto->proveedorProductoCodigo,
-                'moneda'                => $dto->moneda,
-                'stock'                 => $dto->stock,
-                'stock_cd'              => $dto->stockCD,
+                'stock_total'              => $dto->stockTotal,
                 'garantia'              => $dto->garantia,
                 'en_oferta'             => $dto->enOferta,
                 'ultima_actualizacion'  => now(),
@@ -693,10 +946,15 @@ class ProductoPersistenceService
         }
 
         if (!empty($filas)) {
-            DB::table('proveedor_productos')->upsert($filas, ['proveedor_id', 'producto_id'], [
-                'proveedor_producto_id', 'codigo_proveedor', 'moneda',
-                'stock', 'stock_cd', 'garantia', 'en_oferta', 'ultima_actualizacion', 'updated_at',
-            ]);
+            DB::table('proveedor_productos')->upsert(
+                $filas,
+                ['proveedor_id', 'producto_id'],
+                [
+                    'proveedor_producto_id', 'codigo_proveedor',
+                    'stock_total', 'garantia', 'en_oferta',
+                    'ultima_actualizacion', 'updated_at',
+                ]
+            );
         }
 
         return ProveedorProducto::where('proveedor_id', $proveedorIdBd)
@@ -705,36 +963,111 @@ class ProductoPersistenceService
             ->keyBy(fn($pp) => $pp->proveedor_id . '-' . $pp->producto_id);
     }
 
-    /**
-     * FIX: recibe $productos para evitar N+1 queries (antes hacía Producto::where por cada dto)
-     */
-    protected function insertarPreciosIniciales(array $dtosValidos, Collection $productos, Collection $proveedorProductos): void
+    protected function buscarOCrearProductoConBloqueo(ProductoData $dto): Producto
     {
+        $clave    = $this->claveUnica($dto);
+        $producto = Producto::where('upc', $clave)->lockForUpdate()->first();
+
+        $grupoNombre = $this->procesarNombreGrupo($dto->grupoNombre);
+
+        $datos = [
+            'upc'                 => $clave,
+            'nombre'              => $dto->nombre,
+            'descripcion'         => $dto->descripcion,
+            'descripcion_tecnica' => $dto->descripcionTecnica,
+            'categoria_id'        => $this->cache['categorias'][$dto->categoriaNombre]                    ?? null,
+            'sub_categoria_id'    => $this->cache['subcategorias'][$dto->subcategoriaNombre ?? 'General'] ?? null,
+            'familia_id'          => $this->cache['familias'][$dto->familiaNombre           ?? 'General'] ?? null,
+            'grupo_id'            => $this->cache['grupos'][$grupoNombre]                                 ?? null,
+            'marca_id'            => $this->cache['marcas'][$dto->marcaNombre               ?? 'General'] ?? null,
+            'codigo_fabricante'   => $dto->codigoFabricante,
+            'codigo_barras'       => $dto->codigoBarras,
+        ];
+
+        if (!$producto) return Producto::create($datos);
+
+        $camposRellenables = [
+            'nombre', 'descripcion', 'descripcion_tecnica',
+            'categoria_id', 'sub_categoria_id', 'familia_id',
+            'grupo_id', 'marca_id', 'codigo_fabricante', 'codigo_barras',
+        ];
+
+        $actualizaciones = [];
+        foreach ($camposRellenables as $campo) {
+            if (empty($producto->{$campo}) && !empty($datos[$campo])) {
+                $actualizaciones[$campo] = $datos[$campo];
+            }
+        }
+
+        if (!empty($actualizaciones)) {
+            $actualizaciones['updated_at'] = now();
+            $producto->update($actualizaciones);
+        }
+
+        return $producto->fresh();
+    }
+
+    protected function buscarOCrearProveedorProductoConBloqueo(
+        ProductoData $dto,
+        int          $productoId,
+        int          $proveedorIdBd
+    ): ProveedorProducto {
+        $pp = ProveedorProducto::where('proveedor_id', $proveedorIdBd)
+            ->where('producto_id', $productoId)
+            ->lockForUpdate()
+            ->first();
+
+        return $pp ?? ProveedorProducto::create([
+            'proveedor_id'          => $proveedorIdBd,
+            'producto_id'           => $productoId,
+            'proveedor_producto_id' => $dto->proveedorProductoId,
+            'codigo_proveedor'      => $dto->proveedorProductoCodigo,
+            'moneda'                => $dto->moneda,
+            'stock_total'           => $dto->stockTotal,
+            'garantia'              => $dto->garantia,
+            'en_oferta'             => $dto->enOferta,
+            'ultima_actualizacion'  => now(),
+        ]);
+    }
+
+    protected function insertarPreciosIniciales(
+        array      $dtosValidos,
+        Collection $productos,
+        Collection $proveedorProductos
+    ): void {
         $filas = [];
 
         foreach ($dtosValidos as $dto) {
             if (!is_numeric($dto->precioActual)) continue;
 
-            // FIX: usar la colección ya cargada en vez de query individual
             $producto = $productos[$this->claveUnica($dto)] ?? null;
             if (!$producto) continue;
 
             $pp = $proveedorProductos->firstWhere('producto_id', $producto->id);
             if (!$pp) continue;
 
-            $filas[] = [
-                'proveedor_producto_id' => $pp->id,
-                'precio_actual'         => $dto->precioActual,
-                'precio_anterior'       => null,
-                'ultima_actualizacion'  => now(),
-                'created_at'            => now(),
-                'updated_at'            => now(),
-            ];
+            $filas[] = array_merge(
+                $this->datosPrecioDesdeDto($dto),
+                [
+                    'proveedor_producto_id' => $pp->id,
+                    'precio_anterior'       => null,
+                    'ultima_actualizacion'  => now(),
+                    'created_at'            => now(),
+                    'updated_at'            => now(),
+                ]
+            );
         }
 
         if (!empty($filas)) {
             DB::table('proveedor_producto_precios')->upsert(
-                $filas, ['proveedor_producto_id'], ['precio_actual', 'ultima_actualizacion', 'updated_at']
+                $filas,
+                ['proveedor_producto_id'],
+                [
+                    'moneda_venta', 'precio_venta', 'precio_anterior',
+                    'precio_base_producto', 'moneda_base_producto',
+                    'precio_recomendado_proveedor', 'porcentaje_utilidad',
+                    'tipo_cambio_usado_mxn', 'ultima_actualizacion', 'updated_at',
+                ]
             );
         }
     }
@@ -758,45 +1091,10 @@ class ProductoPersistenceService
         }
 
         if (!empty($filas)) {
-            DB::table('producto_imagenes')->upsert($filas, ['url_imagen', 'producto_id'], ['updated_at']);
-        }
-    }
-
-    /**
-     * FIX: recibe $productos para evitar N+1 queries (antes hacía Producto::where por cada dto)
-     */
-    protected function insertarPromocionesIniciales(array $dtosValidos, Collection $productos, Collection $proveedorProductos): void
-    {
-        $filas = [];
-
-        foreach ($dtosValidos as $dto) {
-            // FIX: condición unificada con batch e individual
-            $tienePromocion = $dto->esOferta || $dto->descuentoTotal !== null;
-            if (!$tienePromocion) continue;
-
-            // FIX: usar la colección ya cargada en vez de query individual
-            $producto = $productos[$this->claveUnica($dto)] ?? null;
-            if (!$producto) continue;
-
-            $pp = $proveedorProductos->firstWhere('producto_id', $producto->id);
-            if (!$pp) continue;
-
-            $filas[] = array_merge(
-                $this->construirDatosPromocion($dto, $pp->id),
-                ['clave_promocion' => $dto->clavePromocion ?? 'PROMO-' . $pp->id]
-            );
-        }
-
-        if (!empty($filas)) {
-            DB::table('proveedor_producto_promociones')->upsert(
+            DB::table('producto_imagenes')->upsert(
                 $filas,
-                ['proveedor_producto_id', 'clave_promocion'],
-                [
-                    'total_descuento', 'moneda_descuento', 'precio_con_descuento',
-                    'descuento_precio_moneda', 'descripcion_promocion', 'expiracion',
-                    'disponible_en_promocion', 'precio_oferta', 'precio_regular',
-                    'es_oferta', 'updated_at',
-                ]
+                ['url_imagen', 'producto_id'],
+                ['updated_at']
             );
         }
     }
@@ -880,6 +1178,33 @@ class ProductoPersistenceService
     // HELPERS
     // =========================================================================
 
+    protected function datosPrecioDesdeDto(ProductoData $dto): array
+    {
+        return [
+            'moneda_venta'                => $dto->moneda,
+            'precio_venta'                => $dto->precioActual,
+            'precio_base_producto'        => $dto->precioBaseProducto,
+            'moneda_base_producto'        => $dto->monedaBaseProducto,
+            'precio_recomendado_proveedor'=> $dto->precioRecomendadoProveedor,
+            'porcentaje_utilidad'         => $dto->porcentajeUtilidadAplicado,
+            'tipo_cambio_usado_mxn'       => $dto->tipoCambioUsadoMxn,
+        ];
+    }
+
+    protected function precioHaCambiado($registro, ProductoData $dto): bool
+    {
+        if (!$registro) return true;
+        if ((float)  $registro->precio_actual              !== (float)  $dto->precioActual)              return true;
+        if (          $registro->moneda                    !==           $dto->moneda)                   return true;
+        if ((string) $registro->precio_base_producto       !== (string) $dto->precioBaseProducto)        return true;
+        if (          $registro->moneda_base_producto      !==           $dto->monedaBaseProducto)       return true;
+        if ((string) $registro->precio_recomendado_proveedor !== (string) $dto->precioRecomendadoProveedor) return true;
+        if ((int)    $registro->porcentaje_utilidad_aplicado !== (int)  $dto->porcentajeUtilidadAplicado) return true;
+        if ((string) $registro->tipo_cambio_usado_mxn      !== (string) $dto->tipoCambioUsadoMxn)        return true;
+
+        return false;
+    }
+
     protected function claveUnica(ProductoData $dto): ?string
     {
         return $dto->upc ?? $dto->codigoBarras ?? null;
@@ -915,21 +1240,13 @@ class ProductoPersistenceService
         });
     }
 
-    /**
-     * Valida que el precio sea un número positivo.
-     * Descarta: null, string vacío, strings no numéricos, cero o negativos.
-     */
     protected function precioEsValido(mixed $precio): bool
     {
-        if ($precio === null || $precio === '') {
-            return false;
-        }
+        if ($precio === null || $precio === '') return false;
 
         $limpio = preg_replace('/[^0-9.]/', '', (string) $precio);
 
-        if (!is_numeric($limpio) || (float) $limpio <= 0) {
-            return false;
-        }
+        if (!is_numeric($limpio) || (float) $limpio <= 0) return false;
 
         if ((float) $limpio > 9_999_999) {
             Log::warning('[Persistencia] Precio sospechosamente alto descartado', ['precio' => $precio]);
@@ -939,19 +1256,11 @@ class ProductoPersistenceService
         return true;
     }
 
-    /**
-     * Valida que la moneda sea un código ISO 4217 conocido.
-     * Descarta: null, vacío, strings que no sean códigos válidos.
-     */
     protected function monedaEsValida(mixed $moneda): bool
     {
-        if ($moneda === null || trim((string) $moneda) === '') {
-            return false;
-        }
+        if ($moneda === null || trim((string) $moneda) === '') return false;
 
-        $monedasAceptadas = ['MXN', 'USD', 'EUR'];
-
-        return in_array(strtoupper(trim((string) $moneda)), $monedasAceptadas, true);
+        return in_array(strtoupper(trim((string) $moneda)), ['MXN', 'USD', 'EUR'], true);
     }
 
     protected function buscarProveedorProductoConBloqueo(ProductoData $dto, int $proveedorIdBd)
@@ -965,7 +1274,6 @@ class ProductoPersistenceService
             ->first();
     }
 
-    // FIX: conservado para compatibilidad pero ya no se usa en actualizarStockBatch
     protected function buscarProveedorProducto(ProductoData $dto, int $proveedorIdBd)
     {
         return DB::table('proveedor_productos as pp')
@@ -974,60 +1282,6 @@ class ProductoPersistenceService
             ->where('p.upc', $this->claveUnica($dto))
             ->select('pp.*')
             ->first();
-    }
-
-    /**
-     * FIX: incluye updated_at (antes faltaba y causaba null en strict mode).
-     * FIX: los campos que actualiza el bloque "misma promoción" ahora están completos
-     *      (precio_oferta, precio_regular, expiracion) — antes quedaban stale.
-     */
-    protected function construirDatosPromocion(ProductoData $dto, int $ppId): array
-    {
-        return [
-            'proveedor_producto_id'   => $ppId,
-            'total_descuento'         => $dto->descuentoTotal,
-            'moneda_descuento'        => $dto->descuentoMoneda,
-            'precio_con_descuento'    => $dto->descuentoPrecio,
-            'descuento_precio_moneda' => $dto->descuentoPrecioMoneda,
-            'clave_promocion'         => $dto->clavePromocion,
-            'descripcion_promocion'   => $dto->promocionDescripcion,
-            'expiracion'              => $dto->promocionExpiracion,
-            'disponible_en_promocion' => $dto->disponiblesEnPromocion,
-            'precio_oferta'           => $dto->ofertaPrecio,
-            'precio_regular'          => $dto->precioRegular,
-            'es_oferta'               => $dto->esOferta,
-            'created_at'              => now(),
-            'updated_at'              => now(), // FIX: faltaba
-        ];
-    }
-
-    /**
-     * FIX: manejo correcto de nulls.
-     * - Si alguna clave es null → siempre se considera cambio (antes null != null era false).
-     * FIX: compara también descripcion y expiracion para detectar cambios reales de promoción
-     *      más allá de solo la clave.
-     */
-    protected function promocionHaCambiado($ultima, array $nueva): bool
-    {
-        // Si alguna clave es null, no podemos confiar en la comparación → asumir cambio
-        if ($ultima->clave_promocion === null || $nueva['clave_promocion'] === null) {
-            return true;
-        }
-
-        if ($ultima->clave_promocion !== $nueva['clave_promocion']) {
-            return true;
-        }
-
-        // Campos adicionales que, si cambian, ameritan una nueva fila de historial
-        if ($ultima->descripcion_promocion !== $nueva['descripcion_promocion']) {
-            return true;
-        }
-
-        if ($ultima->expiracion !== $nueva['expiracion']) {
-            return true;
-        }
-
-        return false;
     }
 
     protected function procesarNombreGrupo(?string $grupoNombre): string
@@ -1040,12 +1294,11 @@ class ProductoPersistenceService
         return !empty($nombre) ? substr($nombre, 0, 255) : 'General';
     }
 
-    // =========================================================================
-    // REINTENTOS Y DEADLOCKS
-    // =========================================================================
-
-    protected function ejecutarConReintentos(callable $op, int $maxIntentos = self::MAX_RETRIES, ?callable $onError = null)
-    {
+    protected function ejecutarConReintentos(
+        callable  $op,
+        int       $maxIntentos = self::MAX_RETRIES,
+        ?callable $onError     = null
+    ) {
         $intento = 0;
 
         while ($intento < $maxIntentos) {
@@ -1068,10 +1321,10 @@ class ProductoPersistenceService
 
     protected function esDeadlock(\Throwable $e): bool
     {
-        return str_contains($e->getMessage(), 'Deadlock') ||
-               str_contains($e->getMessage(), 'try restarting transaction') ||
-               $e->getCode() === '40001' ||
-               $e->getCode() === 1213;
+        return str_contains($e->getMessage(), 'Deadlock')
+            || str_contains($e->getMessage(), 'try restarting transaction')
+            || $e->getCode() === '40001'
+            || $e->getCode() === 1213;
     }
 
     protected function sumarStats(array &$base, ?array $nuevo): void

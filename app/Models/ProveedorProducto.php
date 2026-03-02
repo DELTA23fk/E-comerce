@@ -14,8 +14,7 @@ class ProveedorProducto extends Model
     protected $fillable = [
         'proveedor_producto_id',
         'codigo_proveedor',
-        'stock',
-        'stock_cd',
+        'stock_total',
         'moneda',
         'garantia',
         'ultima_actualizacion',
@@ -29,8 +28,7 @@ class ProveedorProducto extends Model
         return [
             'proveedor_producto_id' => 'string',
             'codigo_proveedor' => 'string',
-            'stock' => 'integer',
-            'stock_cd' => 'integer',
+            'stock_total' => 'integer',
             'moneda' => 'string',
             'garantia' => 'string',
             'ultima_actualizacion' => 'datetime',
@@ -56,13 +54,33 @@ class ProveedorProducto extends Model
         return $this->belongsTo(Producto::class);
     }
 
-    public function pricio()
+    /**
+     * Relación con precios históricos.
+     * Un proveedor puede tener múltiples registros de precio
+     * almacenados en la tabla `proveedor_producto_precios`.
+     */
+    public function precios()
     {
-        return $this->hasOne(ProveedorProductoPrecio::class);
+        return $this->hasMany(ProveedorProductoPrecio::class);
+    }
+
+    /**
+     * Relación rápida al precio más reciente.
+     * Se define como hasOne mas ordenado por última actualización.
+     */
+    public function precio()
+    {
+        return $this->hasOne(ProveedorProductoPrecio::class)
+                    ->latest('ultima_actualizacion');
     }
 
     public function promociones()
     {
         return $this->hasMany(ProveedorProductoPromocion::class);
+    }
+    
+    public function almacenes()
+    {
+        return $this->hasMany(AlmacenProductoStock::class, 'proveedor_producto_id');
     }
 }

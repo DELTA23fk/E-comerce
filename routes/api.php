@@ -183,9 +183,6 @@ Route::prefix('v1')->group(function () {
             // Mejor precio disponible
             Route::get('/{productoId}/mejor-precio', [ProductProviderController::class, 'mejorPrecio']);
             
-            // Historial de precios
-            Route::get('/{productoId}/historial-precios', [ProductProviderController::class, 'historialPrecios']);
-            
             // Proveedores por producto
             Route::get('/{productoId}/listado', [ProductProviderController::class, 'proveedoresPorProducto']);
 

@@ -3,12 +3,15 @@
 namespace App\Services;
 
 use App\Models\Producto;
+use App\Services\Traits\MapsProducto;
 use Illuminate\Http\Request;
 use Illuminate\Pagination\LengthAwarePaginator;
 use Illuminate\Support\Collection;
 
 class ProductSearchService
 {
+    use MapsProducto;
+
     protected ProductRelationService $relationService;
 
     public function __construct(ProductRelationService $relationService)
@@ -55,7 +58,8 @@ class ProductSearchService
 
         $perPage = min(max((int)$request->get('per_page', 15), 1), 100);
         
-        return $builder->paginate($perPage);
+                $paginator = $builder->paginate($perPage);
+        return $this->mapPaginator($paginator);
     }
 
     /**
@@ -87,7 +91,8 @@ class ProductSearchService
 
         $perPage = min(max((int)$request->get('per_page', 15), 1), 100);
         
-        return $builder->paginate($perPage);
+                $paginator = $builder->paginate($perPage);
+        return $this->mapPaginator($paginator);
     }
 
     /**
@@ -137,7 +142,7 @@ class ProductSearchService
 
         // Rango de precios
         if (!empty($criterios['precio_min']) || !empty($criterios['precio_max'])) {
-            $builder->whereHas('proveedorProductos.pricios', function ($q) use ($criterios) {
+            $builder->whereHas('proveedorProductos.precio', function ($q) use ($criterios) {
                 if (!empty($criterios['precio_min'])) {
                     $q->where('precio_actual', '>=', $criterios['precio_min']);
                 }
@@ -171,8 +176,8 @@ class ProductSearchService
         }
 
         $perPage = min(max((int)($criterios['per_page'] ?? 15), 1), 100);
-        
-        return $builder->paginate($perPage);
+        $paginator = $builder->paginate($perPage);
+        return $this->mapPaginator($paginator);
     }
 
     /**

@@ -4,12 +4,15 @@ namespace App\Services;
 
 use App\Models\Producto;
 use App\Models\ProveedorProducto;
+use App\Services\Traits\MapsProducto;
 use Illuminate\Http\Request;
 use Illuminate\Pagination\LengthAwarePaginator;
 use Illuminate\Support\Collection;
 
 class ProductProviderService
 {
+    use MapsProducto;
+
     protected ProductRelationService $relationService;
     protected ProductRealtimeUpdateService $realtimeUpdateService;
 
@@ -45,13 +48,13 @@ class ProductProviderService
             'proveedorProductos' => function ($q) use ($proveedorId) {
                 $q->where('proveedor_id', $proveedorId)
                     ->whereHas('proveedor', fn($q) => $q->where('activo', true))
-                    ->with(['proveedor', 'pricio', 'promociones']);
+                    ->with(['proveedor', 'precio', 'promociones']);
             }
         ]);
 
         $perPage = min(max((int)$request->get('per_page', 15), 1), 100);
-        
-        return $builder->paginate($perPage);
+        $paginator = $builder->paginate($perPage);
+        return $this->mapPaginator($paginator);
     }
 
     /**
@@ -66,27 +69,26 @@ class ProductProviderService
 
         $producto = Producto::with([
             'proveedorProductos.proveedor',
-            'proveedorProductos.pricio' => function ($q) {
+            'proveedorProductos.precio' => function ($q) {
                 $q->latest('ultima_actualizacion')->limit(1);
             }
         ])->findOrFail($productoId);
 
         return $producto->proveedorProductos->map(function ($proveedorProducto) {
-            $precioActual = $proveedorProducto->pricios->first();
+            $precioActual = $proveedorProducto->precio;
             
             return [
                 'proveedor_id' => $proveedorProducto->proveedor_id,
                 'proveedor_nombre' => $proveedorProducto->proveedor->nombre,
                 'codigo_proveedor' => $proveedorProducto->codigo_proveedor,
-                'precio_actual' => $precioActual ? $precioActual->precio_actual : null,
+                'precio_venta' => $precioActual ? $precioActual->precio_venta : null,
                 'precio_anterior' => $precioActual ? $precioActual->precio_anterior : null,
                 'moneda' => $proveedorProducto->moneda,
-                'stock' => $proveedorProducto->stock,
-                'stock_cd' => $proveedorProducto->stock_cd,
+                'stock_total' => $proveedorProducto->stock_total,
                 'en_oferta' => $proveedorProducto->en_oferta,
                 'ultima_actualizacion' => $proveedorProducto->ultima_actualizacion,
             ];
-        })->sortBy('precio_actual')->values();
+        })->sortBy('precio_venta')->values();
     }
 
     /**
@@ -126,7 +128,7 @@ class ProductProviderService
 
         $producto = Producto::with([
             'proveedorProductos.proveedor',
-            'proveedorProductos.pricio' => function ($q) use ($fechaInicio) {
+            'proveedorProductos.precios' => function ($q) use ($fechaInicio) {
                 $q->where('created_at', '>=', $fechaInicio)
                     ->orderBy('created_at', 'desc');
             }
@@ -135,12 +137,12 @@ class ProductProviderService
         $historial = collect();
 
         foreach ($producto->proveedorProductos as $proveedorProducto) {
-            foreach ($proveedorProducto->pricios as $precio) {
+            foreach ($proveedorProducto->precios as $precio) {
                 $historial->push([
                     'fecha' => $precio->created_at->format('Y-m-d'),
                     'proveedor_id' => $proveedorProducto->proveedor_id,
                     'proveedor_nombre' => $proveedorProducto->proveedor->nombre,
-                    'precio_actual' => $precio->precio_actual,
+                    'precio_venta' => $precio->precio_venta,
                     'precio_anterior' => $precio->precio_anterior,
                     'moneda' => $proveedorProducto->moneda,
                 ]);
@@ -160,13 +162,13 @@ class ProductProviderService
     {
         $this->realtimeUpdateService->actualizarTodosLosProveedoresConThrottling($productoId);
 
-        return ProveedorProducto::with(['proveedor', 'pricio' => function ($q) {
+        return ProveedorProducto::with(['proveedor', 'precio' => function ($q) {
             $q->latest('ultima_actualizacion')->limit(1);
         }])
             ->where('producto_id', $productoId)
             ->get()
             ->map(function ($proveedorProducto) {
-                $precioActual = $proveedorProducto->pricios->first();
+                $precioActual = $proveedorProducto->precio;
                 
                 return [
                     'proveedor_producto_id' => $proveedorProducto->id,
@@ -177,10 +179,8 @@ class ProductProviderService
                         'activo' => $proveedorProducto->proveedor->activo,
                     ],
                     'codigo_proveedor' => $proveedorProducto->codigo_proveedor,
-                    'stock' => $proveedorProducto->stock,
-                    'stock_cd' => $proveedorProducto->stock_cd,
-                    'stock_total' => $proveedorProducto->stock + $proveedorProducto->stock_cd,
-                    'tiene_stock' => ($proveedorProducto->stock > 0 || $proveedorProducto->stock_cd > 0),
+                    'stock_total' => $proveedorProducto->stock_total,
+                    'tiene_stock' => ($proveedorProducto->stock_total > 0),
                     'moneda' => $proveedorProducto->moneda,
                     'garantia' => $proveedorProducto->garantia,
                     'en_oferta' => $proveedorProducto->en_oferta,
