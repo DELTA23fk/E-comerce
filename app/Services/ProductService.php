@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\Producto;
+use App\Services\Traits\MapsProducto;
 use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Request;
@@ -11,6 +12,8 @@ use Illuminate\Support\Collection;
 
 class ProductService
 {
+    use MapsProducto;
+
     protected ProductFilterService $filterService;
     protected ProductRelationService $relationService;
     protected ProductRealtimeUpdateService $realtimeUpdateService;
@@ -54,8 +57,8 @@ class ProductService
 
         // Paginación
         $perPage = $this->getPerPage($request);
-        
-        return $query->paginate($perPage);
+        $paginator = $query->paginate($perPage);
+        return $this->mapPaginator($paginator);
     }
 
     /**
@@ -82,7 +85,8 @@ class ProductService
             $query->with($relations);
         }
 
-        return $query->find($id);
+        $producto = $query->find($id);
+        return $producto ? $this->mapProducto($producto) : null;
     }
 
     /**
@@ -118,7 +122,7 @@ class ProductService
             
         }
         
-        return $productos;
+        return $productos->map(fn($p) => $this->mapProducto($p));
 
     }
 
@@ -200,7 +204,7 @@ class ProductService
 
 
         if ($min !== null || $max !== null) {
-            $query->whereHas('proveedorProductos.pricio', function ($q) use ($min, $max) {
+            $query->whereHas('proveedorProductos.precio', function ($q) use ($min, $max) {
                 if ($min !== null) {
                     $q->where('precio_actual', '>=', $min);
                 }
@@ -216,8 +220,8 @@ class ProductService
         }
 
         $perPage = $this->getPerPage($request);
-        
-        return $query->paginate($perPage);
+        $paginator = $query->paginate($perPage);
+        return $this->mapPaginator($paginator);
     }
 
     /**
@@ -239,8 +243,8 @@ class ProductService
         $query->orderBy('created_at', 'desc');
 
         $perPage = $this->getPerPage($request);
-        
-        return $query->paginate($perPage);
+        $paginator = $query->paginate($perPage);
+        return $this->mapPaginator($paginator);
     }
 
     /**
@@ -260,7 +264,8 @@ class ProductService
 
         return $query->orderBy('created_at', 'desc')
             ->limit($limite)
-            ->get();
+            ->get()
+            ->map(fn($p) => $this->mapProducto($p));
     }
 
     /**
@@ -282,8 +287,8 @@ class ProductService
         }
 
         $perPage = $this->getPerPage($request);
-        
-        return $query->paginate($perPage);
+        $paginator = $query->paginate($perPage);
+        return $this->mapPaginator($paginator);
     }
 
     /**

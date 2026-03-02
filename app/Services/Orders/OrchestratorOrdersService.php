@@ -34,62 +34,58 @@ class OrchestratorOrdersService
      * @throws ShippingOutOfRangeException
      * @throws ShippingQuoteException
      */
-    public function crearPedido(array $datos): Pedido
+    public function crearPedido(array $datos, string|int|null $almacenPreferido = null): Pedido
     {
-        return DB::transaction(function () use ($datos) {
-            $user = Auth::user();
+        return DB::transaction(function () use ($datos, $almacenPreferido) {
+            $user    = Auth::user();
             $cliente = $user->cliente;
 
             if (!$cliente) {
                 throw new ClientProfileNotFoundException(Auth::id());
             }
 
-            $productosBasicos = $datos ?? [];
-           
-            
-            // 1. AGRUPAR productos por proveedor (solo por clave)
+            $productosBasicos      = $datos ?? [];
             $productosPorProveedor = $this->agruparProductosPorProveedor($productosBasicos);
 
             $todosLosProductosEnriquecidos = [];
-            $totalProductos = 0;
-            $totalEnvio = 0;
+            $totalProductos                = 0;
+            $totalEnvio                    = 0;
 
-            // 2. DELEGAR enriquecimiento y validación a cada proveedor
             foreach ($productosPorProveedor as $proveedorId => $productosProveedor) {
                 $proveedorService = $this->proveedorFactory->crear($proveedorId);
 
-                // El servicio específico aplica su lógica de precios/ofertas
                 $productosEnriquecidos = $proveedorService->enriquecerProductos($productosProveedor);
 
-                // El servicio específico valida según sus reglas (puede lanzar excepciones)
-                $proveedorService->validarDisponibilidad($productosEnriquecidos);
+                // Pasar almacenPreferido — cada servicio lo acepta como opcional
+                $proveedorService->validarDisponibilidad($productosEnriquecidos, $almacenPreferido);
 
-                // El servicio específico cotiza envío (puede lanzar excepciones)
-                $cotizacion = $proveedorService->cotizarEnvio($productosEnriquecidos, $cliente);
+                $cotizacion = $proveedorService->cotizarEnvio(
+                    $productosEnriquecidos,
+                    $cliente,
+                    $almacenPreferido
+                );
 
-                // Acumular totales
                 $totalProductos += collect($productosEnriquecidos)->sum(fn($p) => $p->getSubtotal());
-                $totalEnvio += $cotizacion->montoTotal;
+                $totalEnvio     += $cotizacion->montoTotal;
 
                 $todosLosProductosEnriquecidos = array_merge(
-                    $todosLosProductosEnriquecidos, 
+                    $todosLosProductosEnriquecidos,
                     $productosEnriquecidos
                 );
             }
 
-            // 3. Crear pedido maestro (solo si pasó todas las validaciones)
             $pedido = Pedido::create([
-                'folio' => $this->generarFolio(),
-                'fecha_pedido' => now(),
-                'estatus' => 'pendiente_pago',
-                'cliente_id' => $cliente->id,
-                'precio_total' => $totalProductos + $totalEnvio,
-                'precio_total_productos' => $totalProductos,
-                'precio_total_envio' => $totalEnvio,
-                'datos_envio' => $datos['datos_envio'] ?? null,
+                'folio'                   => $this->generarFolio(),
+                'fecha_pedido'            => now(),
+                'estatus'                 => 'pendiente_pago',
+                'cliente_id'              => $cliente->id,
+                'precio_total'            => $totalProductos + $totalEnvio,
+                'precio_total_productos'  => $totalProductos,
+                'precio_total_envio'      => $totalEnvio,
+                'datos_envio'             => $datos['datos_envio']         ?? null,
+                'almacen_preferido'       => $almacenPreferido,            // ← persiste para fase 2
             ]);
 
-            // 4. Guardar productos pendientes
             $this->guardarProductosPendientes($pedido, $todosLosProductosEnriquecidos);
 
             return $pedido->fresh(['detalles']);
@@ -112,72 +108,68 @@ class OrchestratorOrdersService
      * @throws ShippingOutOfRangeException
      * @throws ShippingQuoteException
      */
-    public function cotizarEnvioProductos(array $productos, Cliente $cliente): array
-    {
-        // 1. Agrupar productos por proveedor (solo por código)
+    public function cotizarEnvioProductos(
+        array           $productos,
+        Cliente         $cliente,
+        string|int|null $almacenPreferido = null,
+    ): array {
         $productosPorProveedor = $this->agruparProductosPorProveedor($productos);
 
-        $cotizaciones = [];
-        $totalEnvio = 0;
+        $cotizaciones       = [];
+        $totalEnvio         = 0;
         $erroresProveedores = [];
 
-        // 2. Cotizar envío con cada proveedor
         foreach ($productosPorProveedor as $proveedorId => $productosProveedor) {
             try {
-                $proveedorService = $this->proveedorFactory->crear($proveedorId);
+                $proveedorService  = $this->proveedorFactory->crear($proveedorId);
+                $productosBasicos  = $this->obtenerProductosBasicosParaCotizacion($productosProveedor);
 
-                // Obtener datos básicos de productos (SIN enriquecer con ofertas)
-                $productosBasicos = $this->obtenerProductosBasicosParaCotizacion($productosProveedor);
-
-                // Cotizar SOLO el envío (el servicio usará precios base internamente)
-                $cotizacion = $proveedorService->cotizarEnvio($productosBasicos, $cliente);
+                $cotizacion = $proveedorService->cotizarEnvio(
+                    $productosBasicos,
+                    $cliente,
+                    $almacenPreferido  // ← propagado
+                );
 
                 $cotizaciones[] = [
-                    'proveedor' => $proveedorService->obtenerNombre(),
+                    'proveedor'   => $proveedorService->obtenerNombre(),
                     'costo_envio' => $cotizacion->montoTotal,
-                    'detalles' => [
-                        'subtotal' => $cotizacion->subtotal,
-                        'iva' => $cotizacion->iva,
+                    'detalles'    => [
+                        'subtotal'    => $cotizacion->subtotal,
+                        'iva'         => $cotizacion->iva,
                         'monto_total' => $cotizacion->montoTotal,
-                        'adicional' => $cotizacion->detalles
-                    ]
+                        'adicional'   => $cotizacion->detalles,
+                    ],
                 ];
 
                 $totalEnvio += $cotizacion->montoTotal;
 
             } catch (ShippingOutOfRangeException $e) {
-                // Error crítico: Cliente fuera de alcance
                 throw $e;
 
             } catch (ShippingQuoteException $e) {
-                // Error al cotizar con un proveedor específico
                 $erroresProveedores[] = [
                     'proveedor_id' => $proveedorId,
-                    'error' => $e->getMessage(),
-                    'tipo' => 'cotizacion'
+                    'error'        => $e->getMessage(),
+                    'tipo'         => 'cotizacion',
                 ];
-
                 \Log::warning('Fallo cotización de envío con proveedor', [
                     'proveedor_id' => $proveedorId,
-                    'error' => $e->getMessage()
+                    'error'        => $e->getMessage(),
                 ]);
 
             } catch (\Exception $e) {
-                // Error inesperado
                 $erroresProveedores[] = [
                     'proveedor_id' => $proveedorId,
-                    'error' => $e->getMessage(),
-                    'tipo' => 'inesperado'
+                    'error'        => $e->getMessage(),
+                    'tipo'         => 'inesperado',
                 ];
-
                 \Log::error('Error inesperado al cotizar envío', [
                     'proveedor_id' => $proveedorId,
-                    'error' => $e->getMessage()
+                    'error'        => $e->getMessage(),
                 ]);
             }
         }
 
-        // Si TODOS los proveedores fallaron, lanzar excepción
         if (empty($cotizaciones) && !empty($erroresProveedores)) {
             throw new ShippingQuoteException(
                 'Todos los proveedores',
@@ -187,9 +179,9 @@ class OrchestratorOrdersService
         }
 
         return [
-            'cotizaciones' => $cotizaciones,
-            'total_envio' => round($totalEnvio, 2),
-            'errores_proveedores' => $erroresProveedores
+            'cotizaciones'       => $cotizaciones,
+            'total_envio'        => round($totalEnvio, 2),
+            'errores_proveedores' => $erroresProveedores,
         ];
     }
 
@@ -204,10 +196,9 @@ class OrchestratorOrdersService
     {
         $claves = collect($productosBasicos)->pluck('codigo_proveedor')->unique()->toArray();
 
-        // Consulta ligera: solo stock y proveedor_id
-        $productosDb = \DB::table('proveedor_productos')
+        $productosDb = DB::table('proveedor_productos')
             ->whereIn('codigo_proveedor', $claves)
-            ->select('id', 'codigo_proveedor', 'proveedor_id', 'producto_id', 'stock', 'stock_cd')
+            ->select('id', 'codigo_proveedor', 'proveedor_id', 'producto_id', 'stock_total') // ← solo stock_total
             ->get()
             ->keyBy('codigo_proveedor');
 
@@ -218,22 +209,19 @@ class OrchestratorOrdersService
                 throw new ProductNotFoundException($productoBasico['codigo_proveedor']);
             }
 
-            // Crear ProductoEnriquecidoData con datos mínimos
-            // Sin precio, sin ofertas, solo para cotización de envío
             return new ProductoEnriquecidoData(
                 proveedorProductoId: $proveedorProducto->id,
-                codigoProveedor: $proveedorProducto->codigo_proveedor,
-                cantidad: $productoBasico['cantidad'],
-                precioUnitario: 0, // No necesario para cotizar envío
-                precioOriginal: 0,
-                proveedorId: $proveedorProducto->proveedor_id,
-                productoId: $proveedorProducto->producto_id,
-                enOferta: false,
+                codigoProveedor:     $proveedorProducto->codigo_proveedor,
+                cantidad:            $productoBasico['cantidad'],
+                precioUnitario:      0,
+                precioOriginal:      0,
+                proveedorId:         $proveedorProducto->proveedor_id,
+                productoId:          $proveedorProducto->producto_id,
+                enOferta:            false,
                 descuentoPorcentaje: null,
-                clavePromocion: null,
-                metadataProveedor: [
-                    'stock' => $proveedorProducto->stock,
-                    'stock_cd' => $proveedorProducto->stock_cd,
+                clavePromocion:      null,
+                metadataProveedor:   [
+                    'stock_total' => $proveedorProducto->stock_total, // ← solo campo resumen
                 ]
             );
         })->toArray();
@@ -386,84 +374,75 @@ class OrchestratorOrdersService
      * Procesar un subpedido con un proveedor específico
      */
     private function procesarSubpedido(
-        Pedido $pedido,
-        int $proveedorId,
-        array $detalles,
+        Pedido  $pedido,
+        int     $proveedorId,
+        array   $detalles,
         Cliente $cliente,
-        ?array $datosEnvio
+        ?array  $datosEnvio
     ): ?array {
         try {
             $proveedorService = $this->proveedorFactory->crear($proveedorId);
 
-            // Convertir detalles a formato que espera el proveedor
             $productos = collect($detalles)->map(fn($detalle) => [
                 'proveedor_producto_id' => $detalle['proveedor_producto_id'],
-                'codigo_proveedor' => $detalle['clave_proveedor'],
-                'cantidad' => $detalle['cantidad'],
-                'precio_unitario' => $detalle['precio_unitario'],
+                'codigo_proveedor'      => $detalle['clave_proveedor'],
+                'cantidad'              => $detalle['cantidad'],
+                'precio_unitario'       => $detalle['precio_unitario'],
             ])->toArray();
 
-            // Preparar request
             $request = new PedidoProveedorRequestData(
-                proveedorId: $proveedorId,
-                numeroOrden: $pedido->folio,
-                productos: $productos,
-                datosEnvio: $datosEnvio,
-                test: config('app.env') !== 'production'
+                proveedorId:  $proveedorId,
+                numeroOrden:  $pedido->folio,
+                productos:    $productos,
+                datosEnvio:   $datosEnvio,
+                test:         config('app.env') !== 'production'
             );
 
-            // Llamar al proveedor
-            $response = $proveedorService->crearPedido($request, $cliente);
+            // Recuperar preferido persistido en fase 1
+            $almacenPreferido = $pedido->almacen_preferido ?? null;
+
+            $response = $proveedorService->crearPedido($request, $cliente, $almacenPreferido);
 
             if (!$response['success']) {
                 \Log::error('Error al procesar subpedido', [
-                    'pedido_id' => $pedido->id,
+                    'pedido_id'    => $pedido->id,
                     'proveedor_id' => $proveedorId,
-                    'error' => $response['error'] ?? 'Error desconocido'
+                    'error'        => $response['error'] ?? 'Error desconocido',
                 ]);
                 return null;
             }
 
-            // Manejar múltiples pedidos (caso CVA con CEDIS + Sucursal)
-            $result = [
-                'subtotal' => 0,
-                'envio' => 0,
-                'total' => 0,
-                'pedidos_proveedor_ids' => [],
-                'folios' => []
-            ];
-
+            $result      = ['subtotal' => 0, 'envio' => 0, 'total' => 0, 'pedidos_proveedor_ids' => [], 'folios' => []];
             $pedidosData = $response['data'];
-            
+
             if (!isset($pedidosData[0])) {
                 $pedidosData = [$pedidosData];
             }
 
             foreach ($pedidosData as $pedidoData) {
                 $pedidoProveedor = PedidoProveedor::create([
-                    'pedido_id' => $pedido->id,
-                    'proveedor_id' => $proveedorId,
-                    'folio_pedido' => $pedidoData['folioPedido'],
-                    'precio_total_productos' => $pedidoData['subtotal'],
-                    'precio_total_envio' => $pedidoData['flete']['monto_total'] ?? 0,
-                    'precio_total' => $pedidoData['total'],
-                    'moneda' => $pedidoData['moneda'] ?? 'MXN',
-                    'email_agente' => $pedidoData['emailAgente'] ?? null,
-                    'email_almacen' => $pedidoData['emailAlmacen'] ?? null,
-                    'envio_gratis' => ($pedidoData['flete']['monto_total'] ?? 0) == 0,
-                    'origen_envio' => $pedidoData['origen'] ?? null,
-                    'status' => 'creado',
-                    'requiere_atencion_manual' => false
+                    'pedido_id'               => $pedido->id,
+                    'proveedor_id'            => $proveedorId,
+                    'folio_pedido'            => $pedidoData['folioPedido'],
+                    'precio_total_productos'  => $pedidoData['subtotal'],
+                    'precio_total_envio'      => $pedidoData['flete']['monto_total'] ?? 0,
+                    'precio_total'            => $pedidoData['total'],
+                    'moneda'                  => $pedidoData['moneda']        ?? 'MXN',
+                    'email_agente'            => $pedidoData['emailAgente']   ?? null,
+                    'email_almacen'           => $pedidoData['emailAlmacen']  ?? null,
+                    'envio_gratis'            => ($pedidoData['flete']['monto_total'] ?? 0) == 0,
+                    'origen_envio'            => $pedidoData['origen']        ?? null,
+                    'status'                  => 'creado',
+                    'requiere_atencion_manual' => false,
                 ]);
 
                 $result['pedidos_proveedor_ids'][] = $pedidoProveedor->id;
-                $result['folios'][] = $pedidoData['folioPedido'];
-                $result['subtotal'] += $pedidoData['subtotal'] ?? 0;
-                $result['envio'] += $pedidoData['flete']['monto_total'] ?? 0;
-                $result['total'] += $pedidoData['total'] ?? 0;
+                $result['folios'][]                 = $pedidoData['folioPedido'];
+                $result['subtotal']                += $pedidoData['subtotal']                    ?? 0;
+                $result['envio']                   += $pedidoData['flete']['monto_total']        ?? 0;
+                $result['total']                   += $pedidoData['total']                       ?? 0;
             }
 
-            // Actualizar detalles con el primer pedido_proveedor_id
             $idsDetalles = collect($detalles)->pluck('id')->toArray();
             DetallePedido::whereIn('id', $idsDetalles)
                 ->update(['pedido_proveedor_id' => $result['pedidos_proveedor_ids'][0]]);
@@ -472,10 +451,10 @@ class OrchestratorOrdersService
 
         } catch (\Exception $e) {
             \Log::error('Excepción al procesar subpedido', [
-                'pedido_id' => $pedido->id,
+                'pedido_id'    => $pedido->id,
                 'proveedor_id' => $proveedorId,
-                'exception' => $e->getMessage(),
-                'trace' => $e->getTraceAsString()
+                'exception'    => $e->getMessage(),
+                'trace'        => $e->getTraceAsString(),
             ]);
             return null;
         }

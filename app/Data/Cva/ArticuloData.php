@@ -29,6 +29,7 @@ class ArticuloData extends Data
         public ?string $imagen,
         public ?array $imagenes,
         public int $disponibleCD,
+        public ?array $disponibilidadSucursales,
 
         #[DataCollectionOf(PromocionCvaData::class)]
         public ?DataCollection $promociones,

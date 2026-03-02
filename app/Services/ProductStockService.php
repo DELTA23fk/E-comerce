@@ -3,12 +3,15 @@
 namespace App\Services;
 
 use App\Models\Producto;
+use App\Services\Traits\MapsProducto;
 use Illuminate\Http\Request;
 use Illuminate\Pagination\LengthAwarePaginator;
 use Illuminate\Support\Collection;
 
 class ProductStockService
 {
+    use MapsProducto;
+
     protected ProductRelationService $relationService;
 
     public function __construct(ProductRelationService $relationService)
@@ -16,142 +19,110 @@ class ProductStockService
         $this->relationService = $relationService;
     }
 
-    /**
-     * Obtener productos con stock disponible
-     * 
-     * @param Request $request
-     * @return LengthAwarePaginator
-     */
     public function obtenerDisponibles(Request $request): LengthAwarePaginator
     {
         $builder = Producto::whereHas('proveedorProductos', function ($q) {
-            $q->where(function ($subQ) {
-                $subQ->where('stock', '>', 0)
-                    ->orWhere('stock_cd', '>', 0);
-            });
+            $q->where('stock_total', '>', 0);
         });
 
-        // Aplicar filtros adicionales
         $this->aplicarFiltrosAdicionales($builder, $request);
 
-        // Aplicar relaciones
         $relations = $this->relationService->buildRelations($request);
         if (!empty($relations)) {
             $builder->with($relations);
         }
 
-        // Siempre incluir stock
+        // Siempre incluir proveedorProductos con sus almacenes para detalle de stock
         $builder->with(['proveedorProductos' => function ($q) {
-            $q->where(function ($subQ) {
-                $subQ->where('stock', '>', 0)
-                    ->orWhere('stock_cd', '>', 0);
-            });
+            $q->where('stock_total', '>', 0)
+              ->with(['almacenes.almacen']);
         }]);
 
         $perPage = min(max((int)$request->get('per_page', 15), 1), 100);
-        
-        return $builder->paginate($perPage);
+        return $this->mapPaginator($builder->paginate($perPage));
     }
 
-    /**
-     * Obtener productos agotados
-     * 
-     * @param Request $request
-     * @return LengthAwarePaginator
-     */
     public function obtenerAgotados(Request $request): LengthAwarePaginator
     {
         $builder = Producto::whereDoesntHave('proveedorProductos', function ($q) {
-            $q->where('stock', '>', 0)
-                ->orWhere('stock_cd', '>', 0);
+            $q->where('stock_total', '>', 0);
         });
 
-        // Aplicar relaciones
         $relations = $this->relationService->buildRelations($request);
         if (!empty($relations)) {
             $builder->with($relations);
         }
 
         $perPage = min(max((int)$request->get('per_page', 15), 1), 100);
-        
-        return $builder->paginate($perPage);
+        return $this->mapPaginator($builder->paginate($perPage));
+    }
+
+    public function obtenerStockBajo(int $umbral, Request $request): LengthAwarePaginator
+    {
+        $builder = Producto::whereHas('proveedorProductos', function ($q) use ($umbral) {
+            $q->where('stock_total', '>', 0)
+              ->where('stock_total', '<=', $umbral);
+        });
+
+        $relations = $this->relationService->buildRelations($request);
+        if (!empty($relations)) {
+            $builder->with($relations);
+        }
+
+        $builder->with(['proveedorProductos' => function ($q) use ($umbral) {
+            $q->where('stock_total', '>', 0)
+              ->where('stock_total', '<=', $umbral)
+              ->with(['almacenes.almacen']);
+        }]);
+
+        $perPage = min(max((int)$request->get('per_page', 15), 1), 100);
+        return $this->mapPaginator($builder->paginate($perPage));
     }
 
     /**
-     * Obtener stock de un producto específico
-     * 
-     * @param int $productoId
-     * @return array
+     * Detalle de stock por producto: desglose por proveedor y por almacén.
      */
     public function obtenerStockPorProducto(int $productoId): array
     {
-        $producto = Producto::with(['proveedorProductos.proveedor'])->findOrFail($productoId);
+        $producto = Producto::with([
+            'proveedorProductos.proveedor',
+            'proveedorProductos.almacenes.almacen',
+        ])->findOrFail($productoId);
 
-        $stockTotal = 0;
-        $stockCdTotal = 0;
-        $proveedores = [];
+        $proveedores = $producto->proveedorProductos->map(function ($pp) {
+            // Desglose por almacén
+            $almacenes = $pp->almacenes->map(fn($a) => [
+                'almacen_nombre'       => $a->almacen->nombre ?? null,
+                'es_principal'         => $a->almacen->es_principal ?? null,
+                'es_cd'                => $a->almacen->es_cd ?? null,
+                'cantidad'             => $a->cantidad,
+                'backorder'            => $a->backorder,
+                'eta_backorder'        => $a->eta_backorder?->format('Y-m-d'),
+                'ultima_actualizacion' => $a->ultima_actualizacion,
+            ])->values();
 
-        foreach ($producto->proveedorProductos as $proveedorProducto) {
-            $stockTotal += $proveedorProducto->stock;
-            $stockCdTotal += $proveedorProducto->stock_cd;
-            
-            $proveedores[] = [
-                'proveedor_id' => $proveedorProducto->proveedor_id,
-                'proveedor_nombre' => $proveedorProducto->proveedor->nombre,
-                'stock' => $proveedorProducto->stock,
-                'stock_cd' => $proveedorProducto->stock_cd,
-                'stock_total_proveedor' => $proveedorProducto->stock + $proveedorProducto->stock_cd,
-                'ultima_actualizacion' => $proveedorProducto->ultima_actualizacion,
+            return [
+                'proveedor_id'         => $pp->proveedor_id,
+                'proveedor_nombre'     => $pp->proveedor->nombre,
+                'stock_total'          => $pp->stock_total,
+                'tiene_stock'          => $pp->stock_total > 0,
+                'moneda'               => $pp->moneda,
+                'ultima_actualizacion' => $pp->ultima_actualizacion,
+                'almacenes'            => $almacenes,
             ];
-        }
+        });
 
         return [
-            'producto_id' => $producto->id,
+            'producto_id'     => $producto->id,
             'producto_nombre' => $producto->nombre,
-            'stock' => $stockTotal,
-            'stock_cd' => $stockCdTotal,
-            'stock_total' => $stockTotal + $stockCdTotal,
-            'tiene_stock' => ($stockTotal > 0 || $stockCdTotal > 0),
-            'proveedores' => $proveedores,
+            'stock_total'     => $producto->proveedorProductos->sum('stock_total'),
+            'tiene_stock'     => $producto->proveedorProductos->sum('stock_total') > 0,
+            'proveedores'     => $proveedores->values()->all(),
         ];
     }
 
     /**
-     * Obtener productos con stock bajo
-     * 
-     * @param int $umbral
-     * @param Request $request
-     * @return LengthAwarePaginator
-     */
-    public function obtenerStockBajo(int $umbral, Request $request): LengthAwarePaginator
-    {
-        $builder = Producto::whereHas('proveedorProductos', function ($q) use ($umbral) {
-            $q->whereRaw('(stock + stock_cd) > 0')
-                ->whereRaw('(stock + stock_cd) <= ?', [$umbral]);
-        });
-
-        // Aplicar relaciones
-        $relations = $this->relationService->buildRelations($request);
-        if (!empty($relations)) {
-            $builder->with($relations);
-        }
-
-        // Siempre incluir stock
-        $builder->with(['proveedorProductos' => function ($q) use ($umbral) {
-            $q->whereRaw('(stock + stock_cd) > 0')
-                ->whereRaw('(stock + stock_cd) <= ?', [$umbral]);
-        }]);
-
-        $perPage = min(max((int)$request->get('per_page', 15), 1), 100);
-        
-        return $builder->paginate($perPage);
-    }
-
-    /**
-     * Verificar disponibilidad de múltiples productos
-     * 
-     * @param array $productosIds
-     * @return Collection
+     * Verificar disponibilidad de múltiples productos.
      */
     public function verificarDisponibilidad(array $productosIds): Collection
     {
@@ -159,37 +130,20 @@ class ProductStockService
             ->whereIn('id', $productosIds)
             ->get()
             ->map(function ($producto) {
-                $stockTotal = 0;
-                $stockCdTotal = 0;
+                $stockTotal = $producto->proveedorProductos->sum('stock_total');
 
-                foreach ($producto->proveedorProductos as $pp) {
-                    $stockTotal += $pp->stock;
-                    $stockCdTotal += $pp->stock_cd;
-                }
-                
                 return [
-                    'producto_id' => $producto->id,
-                    'producto_nombre' => $producto->nombre,
-                    'stock' => $stockTotal,
-                    'stock_cd' => $stockCdTotal,
-                    'stock_total' => $stockTotal + $stockCdTotal,
-                    'disponible' => ($stockTotal > 0 || $stockCdTotal > 0),
+                    'producto_id'          => $producto->id,
+                    'producto_nombre'      => $producto->nombre,
+                    'stock_total'          => $stockTotal,
+                    'tiene_stock'          => $stockTotal > 0,
                     'proveedores_con_stock' => $producto->proveedorProductos
-                        ->filter(function ($pp) {
-                            return $pp->stock > 0 || $pp->stock_cd > 0;
-                        })
+                        ->filter(fn($pp) => $pp->stock_total > 0)
                         ->count(),
                 ];
             });
     }
 
-    /**
-     * Aplicar filtros adicionales
-     * 
-     * @param \Illuminate\Database\Eloquent\Builder $builder
-     * @param Request $request
-     * @return void
-     */
     private function aplicarFiltrosAdicionales($builder, Request $request): void
     {
         if ($request->filled('categoria_id')) {
@@ -203,25 +157,18 @@ class ProductStockService
         if ($request->filled('proveedor_id')) {
             $builder->whereHas('proveedorProductos', function ($q) use ($request) {
                 $q->where('proveedor_id', $request->proveedor_id)
-                    ->where(function ($subQ) {
-                        $subQ->where('stock', '>', 0)
-                            ->orWhere('stock_cd', '>', 0);
-                    });
+                  ->where('stock_total', '>', 0);
             });
         }
 
-        // Filtro por tipo de stock específico
-        if ($request->filled('tipo_stock')) {
-            $tipoStock = $request->tipo_stock; // 'stock', 'stock_cd', 'ambos'
-            
-            $builder->whereHas('proveedorProductos', function ($q) use ($tipoStock) {
-                if ($tipoStock === 'stock') {
-                    $q->where('stock', '>', 0);
-                } elseif ($tipoStock === 'stock_cd') {
-                    $q->where('stock_cd', '>', 0);
-                } elseif ($tipoStock === 'ambos') {
-                    $q->where('stock', '>', 0)
-                        ->where('stock_cd', '>', 0);
+        // Filtro por tipo de almacén: 'principal', 'cd'
+        if ($request->filled('tipo_almacen')) {
+            $tipo = $request->tipo_almacen;
+            $builder->whereHas('proveedorProductos.almacenes.almacen', function ($q) use ($tipo) {
+                if ($tipo === 'principal') {
+                    $q->where('es_principal', true);
+                } elseif ($tipo === 'cd') {
+                    $q->where('es_cd', true);
                 }
             });
         }

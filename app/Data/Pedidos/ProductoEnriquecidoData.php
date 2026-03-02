@@ -33,13 +33,13 @@ readonly class ProductoEnriquecidoData
         ProveedorProducto $proveedorProducto,
         int $cantidad
     ): self {
-        if (!$proveedorProducto->pricio) {
+        if (!$proveedorProducto->precio) {
             throw new \InvalidArgumentException(
                 "Producto '{$proveedorProducto->codigo_proveedor}' no tiene precio configurado"
             );
         }
 
-        $precioOriginal      = (float) $proveedorProducto->pricio->precio_venta;
+        $precioOriginal      = (float) $proveedorProducto->precio->precio_venta;
         $precioFinal         = $precioOriginal;
         $enOferta            = false;
         $descuentoPorcentaje = null;

@@ -36,8 +36,8 @@ class ActualizarTipoCambioJob implements ShouldQueue
         $url = rtrim($urlBase, '/') . '/' . $apiKey . '/latest/USD';
 
         try {
-            // /** @var \Illuminate\Http\Client\Response $response */
-            $respuesta = Http::get($url)->timeout(10);
+            /** @var \Illuminate\Http\Client\Response $respuesta */
+            $respuesta = Http::timeout(10)->get($url);
 
             if (!$respuesta->successful()) {
                 Log::warning('ActualizarTipoCambioJob: respuesta no exitosa', [

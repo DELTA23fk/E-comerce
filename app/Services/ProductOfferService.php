@@ -3,12 +3,15 @@
 namespace App\Services;
 
 use App\Models\Producto;
+use App\Services\Traits\MapsProducto;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Pagination\LengthAwarePaginator;
 
 class ProductOfferService
 {
+    use MapsProducto;
+
     protected ProductRelationService $relationService;
 
     public function __construct(ProductRelationService $relationService)
@@ -32,7 +35,7 @@ class ProductOfferService
             'proveedorProductos' => function ($q) {
                 $q->whereHas('proveedor', fn($q) => $q->where('activo', true))
                   ->where('en_oferta', true)
-                  ->with(['proveedor', 'pricio', 'promociones']);
+                  ->with(['proveedor', 'precio', 'promociones']);
             }
         ]);
 
@@ -43,7 +46,8 @@ class ProductOfferService
         }
 
         $perPage = min(max((int)$request->get('per_page', 15), 1), 100);
-        return $builder->paginate($perPage);
+                $paginator = $builder->paginate($perPage);
+        return $this->mapPaginator($paginator);
     }
 
     public function obtenerOfertasPorCategoria(int $categoriaId, Request $request): LengthAwarePaginator
@@ -63,12 +67,13 @@ class ProductOfferService
             'proveedorProductos' => function ($q) {
                 $q->whereHas('proveedor', fn($q) => $q->where('activo', true))
                   ->where('en_oferta', true)
-                  ->with(['proveedor', 'pricios', 'promociones']);
+                  ->with(['proveedor', 'precios', 'promociones']);
             }
         ]);
 
         $perPage = min(max((int)$request->get('per_page', 15), 1), 100);
-        return $builder->paginate($perPage);
+                $paginator = $builder->paginate($perPage);
+        return $this->mapPaginator($paginator);
     }
 
     public function obtenerPromocionesActivas(Request $request): LengthAwarePaginator
@@ -94,7 +99,8 @@ class ProductOfferService
         ]);
 
         $perPage = min(max((int)$request->get('per_page', 15), 1), 100);
-        return $builder->paginate($perPage);
+                $paginator = $builder->paginate($perPage);
+        return $this->mapPaginator($paginator);
     }
 
     public function obtenerDescuentosMayoresA(int $porcentaje, Request $request): LengthAwarePaginator
@@ -117,7 +123,7 @@ class ProductOfferService
                 $q->whereHas('proveedor', fn($q) => $q->where('activo', true))
                   ->with([
                       'proveedor',
-                      'pricios',
+                      'precios',
                       'promociones' => function ($q) use ($porcentaje) {
                           $q->where('es_oferta', true)
                             ->whereRaw('CAST(total_descuento AS DECIMAL) >= ?', [$porcentaje])
@@ -128,7 +134,8 @@ class ProductOfferService
         ]);
 
         $perPage = min(max((int)$request->get('per_page', 15), 1), 100);
-        return $builder->paginate($perPage);
+                $paginator = $builder->paginate($perPage);
+        return $this->mapPaginator($paginator);
     }
 
     public function obtenerOfertasDelDia(Request $request): LengthAwarePaginator
@@ -151,12 +158,13 @@ class ProductOfferService
                 $q->whereHas('proveedor', fn($q) => $q->where('activo', true))
                   ->where('en_oferta', true)
                   ->whereDate('ultima_actualizacion', '=', $hoy)
-                  ->with(['proveedor', 'pricios', 'promociones']);
+                  ->with(['proveedor', 'precios', 'promociones']);
             }
         ]);
 
         $perPage = min(max((int)$request->get('per_page', 15), 1), 100);
-        return $builder->paginate($perPage);
+                $paginator = $builder->paginate($perPage);
+        return $this->mapPaginator($paginator);
     }
 
     public function obtenerOfertasPorVencer(int $dias, Request $request): LengthAwarePaginator
@@ -183,7 +191,7 @@ class ProductOfferService
                 $q->whereHas('proveedor', fn($q) => $q->where('activo', true))
                   ->with([
                       'proveedor',
-                      'pricios',
+                      'precios',
                       'promociones' => function ($q) use ($hoy, $fechaLimite) {
                           $q->where('es_oferta', true)
                             ->where('expracion', '>=', $hoy)
@@ -195,6 +203,7 @@ class ProductOfferService
         ]);
 
         $perPage = min(max((int)$request->get('per_page', 15), 1), 100);
-        return $builder->paginate($perPage);
+                $paginator = $builder->paginate($perPage);
+        return $this->mapPaginator($paginator);
     }
 }

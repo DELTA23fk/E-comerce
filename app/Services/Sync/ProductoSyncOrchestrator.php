@@ -60,6 +60,7 @@ class ProductoSyncOrchestrator
             return null;
         }
 
+        // persistirBatch ya incluye upsertAlmacenesBatch internamente
         $this->persistencia->persistirBatch($resultado->productos->all(), $proveedorIdBd);
 
         return [
@@ -159,12 +160,6 @@ class ProductoSyncOrchestrator
     /**
      * Actualiza solo precios del proveedor indicado, página a página.
      *
-     * Proveedor unificado  → itera obtenerProductosParaActualizacion()
-     * Proveedor separado   → itera obtenerProductosConPrecioActualizado()
-     *
-     * Cada página se persiste antes de pedir la siguiente:
-     * memoria acotada a ~500 productos en todo momento.
-     *
      * @return array{total: int, actualizados: int, sin_cambios: int, errores: int, paginas: int, proveedor: string}
      */
     public function syncPrecios(string $proveedorClave, array $filtros = []): array
@@ -175,21 +170,18 @@ class ProductoSyncOrchestrator
         Log::info("[Orchestrator] syncPrecios {$proveedorClave}");
 
         return $this->iterar(
-            contexto: "syncPrecios {$proveedorClave}",
-            statsBase: ['total' => 0, 'actualizados' => 0, 'sin_cambios' => 0, 'errores' => 0],
-            obtenerPagina: $servicio->soportaConsultaUnificada()
+            contexto:        "syncPrecios {$proveedorClave}",
+            statsBase:       ['total' => 0, 'actualizados' => 0, 'sin_cambios' => 0, 'errores' => 0],
+            obtenerPagina:   $servicio->soportaConsultaUnificada()
                 ? fn(int $p) => $servicio->obtenerProductosParaActualizacion($p)
                 : fn(int $p) => $servicio->obtenerProductosConPrecioActualizado($p),
             persistirPagina: fn($productos) => $this->persistencia->actualizarPrecios($productos, $proveedorIdBd),
-            proveedor: $proveedorClave,
+            proveedor:       $proveedorClave,
         );
     }
 
     /**
      * Actualiza solo stock del proveedor indicado, página a página.
-     *
-     * Proveedor unificado  → itera obtenerProductosParaActualizacion()
-     * Proveedor separado   → itera obtenerProductosConStockActualizado()
      *
      * @return array{total: int, actualizados: int, sin_cambios: int, errores: int, paginas: int, proveedor: string}
      */
@@ -200,22 +192,57 @@ class ProductoSyncOrchestrator
 
         Log::info("[Orchestrator] syncStock {$proveedorClave}");
 
-        return $this->iterar(
-            contexto: "syncStock {$proveedorClave}",
-            statsBase: ['total' => 0, 'actualizados' => 0, 'sin_cambios' => 0, 'errores' => 0],
-            obtenerPagina: $servicio->soportaConsultaUnificada()
-                ? fn(int $p) => $servicio->obtenerProductosParaActualizacion($p)
-                : fn(int $p) => $servicio->obtenerProductosConStockActualizado($p),
-            persistirPagina: fn($productos) => $this->persistencia->actualizarStock($productos, $proveedorIdBd),
-            proveedor: $proveedorClave,
-        );
+        $statsStock     = ['total' => 0, 'actualizados' => 0, 'sin_cambios' => 0, 'errores' => 0];
+        $statsAlmacenes = ['total' => 0, 'actualizados' => 0, 'sin_cambios' => 0, 'errores' => 0];
+        $pagina         = 1;
+        $totalPaginas   = null;
+
+        $obtenerPagina = $servicio->soportaConsultaUnificada()
+            ? fn(int $p) => $servicio->obtenerProductosParaActualizacion($p)
+            : fn(int $p) => $servicio->obtenerProductosConStockActualizado($p);
+
+        do {
+            $resultado = $obtenerPagina($pagina);
+
+            if ($resultado->estaVacio()) {
+                Log::info("[Orchestrator] syncStock {$proveedorClave} — sin productos en pág. {$pagina}, deteniendo");
+                break;
+            }
+
+            if ($totalPaginas === null) {
+                $totalPaginas = $resultado->totalPaginas;
+            }
+
+            $productos = $resultado->productos;
+
+            // Resumen + detalle sobre la misma colección — sin HTTP adicional
+            $this->sumarStats($statsStock,     $this->persistencia->actualizarStock($productos, $proveedorIdBd));
+            $this->sumarStats($statsAlmacenes, $this->persistencia->actualizarAlmacenes($productos, $proveedorIdBd));
+
+            Log::info("[Orchestrator] syncStock {$proveedorClave} — pág. {$pagina}/{$totalPaginas}", [
+                'productos' => $productos->count(),
+                'stock'     => $statsStock,
+                'almacenes' => $statsAlmacenes,
+            ]);
+
+            $pagina++;
+
+            if ($resultado->hayMasPaginas) {
+                sleep(1);
+            }
+
+        } while ($resultado->hayMasPaginas);
+
+        $procesadas = $pagina - 1;
+
+        return [
+            'stock'     => array_merge($statsStock,     ['paginas' => $procesadas, 'proveedor' => $proveedorClave]),
+            'almacenes' => array_merge($statsAlmacenes, ['paginas' => $procesadas, 'proveedor' => $proveedorClave]),
+        ];
     }
 
     /**
      * Actualiza solo promociones del proveedor indicado, página a página.
-     *
-     * Proveedor unificado  → itera obtenerProductosParaActualizacion()
-     * Proveedor separado   → itera obtenerProductosEnPromocion()
      *
      * @return array{total: int, creadas: int, stock_actualizado: int, sin_cambios: int, expiradas_reemplazadas: int, expiradas_sin_oferta: int, errores: int, paginas: int, proveedor: string}
      */
@@ -227,8 +254,8 @@ class ProductoSyncOrchestrator
         Log::info("[Orchestrator] syncPromociones {$proveedorClave}");
 
         return $this->iterar(
-            contexto: "syncPromociones {$proveedorClave}",
-            statsBase: [
+            contexto:        "syncPromociones {$proveedorClave}",
+            statsBase:       [
                 'total'                  => 0,
                 'creadas'                => 0,
                 'stock_actualizado'      => 0,
@@ -237,28 +264,33 @@ class ProductoSyncOrchestrator
                 'expiradas_sin_oferta'   => 0,
                 'errores'                => 0,
             ],
-            obtenerPagina: $servicio->soportaConsultaUnificada()
+            obtenerPagina:   $servicio->soportaConsultaUnificada()
                 ? fn(int $p) => $servicio->obtenerProductosParaActualizacion($p)
                 : fn(int $p) => $servicio->obtenerProductosEnPromocion($p),
             persistirPagina: fn($productos) => $this->persistencia->actualizarPromociones($productos, $proveedorIdBd),
-            proveedor: $proveedorClave,
+            proveedor:       $proveedorClave,
         );
     }
 
+    public function syncAlmacenes(string $proveedorClave, array $filtros = []): array
+    {
+        return $this->syncStock($proveedorClave, $filtros);
+    }
+
     /**
-     * Actualiza precio + stock + promociones del proveedor, página a página.
+     * Actualiza precio + stock + promociones + almacenes del proveedor,
+     * página a página.
      *
-     * ─── PROVEEDOR UNIFICADO (ej. CVA) ────────────────────────────────────────
-     *   1 HTTP por ciclo → misma página pasa a los 3 métodos de persistencia.
+     * ─── PROVEEDOR UNIFICADO (ej. CVA) ───────────────────────────────────────
+     *   1 HTTP por ciclo → misma página pasa a los 4 métodos de persistencia.
      *   Memoria: ~500 productos en RAM en todo momento.
      *   HTTP total: N páginas.
      *
-     * ─── PROVEEDOR CON ENDPOINTS SEPARADOS (ej. Exel, Syscom) ─────────────────
-     *   3 loops independientes de paginación, uno por tipo.
-     *   Equivalente a llamar syncPrecios + syncStock + syncPromociones.
-     *   HTTP total: 3×N páginas.
+     * ─── PROVEEDOR CON ENDPOINTS SEPARADOS (ej. Exel, Syscom) ────────────────
+     *   4 loops independientes de paginación, uno por tipo.
+     *   HTTP total: 4×N páginas.
      *
-     * @return array{precios: array, stock: array, promociones: array}
+     * @return array{precios: array, stock: array, promociones: array, almacenes: array}
      */
     public function syncTodo(string $proveedorClave, array $filtros = []): array
     {
@@ -266,32 +298,30 @@ class ProductoSyncOrchestrator
         $proveedorIdBd = $this->resolverProveedorIdBd($proveedorClave);
 
         if ($servicio->soportaConsultaUnificada()) {
-            Log::info("[Orchestrator] syncTodo UNIFICADO {$proveedorClave} — 1 HTTP por página, 3 tipos por ciclo");
-
+            Log::info("[Orchestrator] syncTodo UNIFICADO {$proveedorClave} — 1 HTTP por página, 4 tipos por ciclo");
             return $this->syncTodoUnificado($servicio, $proveedorClave, $proveedorIdBd);
         }
 
-        Log::info("[Orchestrator] syncTodo SEPARADO {$proveedorClave} — 3 loops independientes");
+        Log::info("[Orchestrator] syncTodo SEPARADO {$proveedorClave} — 4 loops independientes");
 
-        // Reutiliza $servicio y $proveedorIdBd ya resueltos
         return [
             'precios'     => $this->iterar(
-                contexto: "syncPrecios {$proveedorClave}",
-                statsBase: ['total' => 0, 'actualizados' => 0, 'sin_cambios' => 0, 'errores' => 0],
-                obtenerPagina: fn(int $p) => $servicio->obtenerProductosConPrecioActualizado($p),
+                contexto:        "syncPrecios {$proveedorClave}",
+                statsBase:       ['total' => 0, 'actualizados' => 0, 'sin_cambios' => 0, 'errores' => 0],
+                obtenerPagina:   fn(int $p) => $servicio->obtenerProductosConPrecioActualizado($p),
                 persistirPagina: fn($productos) => $this->persistencia->actualizarPrecios($productos, $proveedorIdBd),
-                proveedor: $proveedorClave,
+                proveedor:       $proveedorClave,
             ),
             'stock'       => $this->iterar(
-                contexto: "syncStock {$proveedorClave}",
-                statsBase: ['total' => 0, 'actualizados' => 0, 'sin_cambios' => 0, 'errores' => 0],
-                obtenerPagina: fn(int $p) => $servicio->obtenerProductosConStockActualizado($p),
+                contexto:        "syncStock {$proveedorClave}",
+                statsBase:       ['total' => 0, 'actualizados' => 0, 'sin_cambios' => 0, 'errores' => 0],
+                obtenerPagina:   fn(int $p) => $servicio->obtenerProductosConStockActualizado($p),
                 persistirPagina: fn($productos) => $this->persistencia->actualizarStock($productos, $proveedorIdBd),
-                proveedor: $proveedorClave,
+                proveedor:       $proveedorClave,
             ),
             'promociones' => $this->iterar(
-                contexto: "syncPromociones {$proveedorClave}",
-                statsBase: [
+                contexto:        "syncPromociones {$proveedorClave}",
+                statsBase:       [
                     'total'                  => 0,
                     'creadas'                => 0,
                     'stock_actualizado'      => 0,
@@ -300,9 +330,16 @@ class ProductoSyncOrchestrator
                     'expiradas_sin_oferta'   => 0,
                     'errores'                => 0,
                 ],
-                obtenerPagina: fn(int $p) => $servicio->obtenerProductosEnPromocion($p),
+                obtenerPagina:   fn(int $p) => $servicio->obtenerProductosEnPromocion($p),
                 persistirPagina: fn($productos) => $this->persistencia->actualizarPromociones($productos, $proveedorIdBd),
-                proveedor: $proveedorClave,
+                proveedor:       $proveedorClave,
+            ),
+            'almacenes'   => $this->iterar(
+                contexto:        "syncAlmacenes {$proveedorClave}",
+                statsBase:       ['total' => 0, 'actualizados' => 0, 'sin_cambios' => 0, 'errores' => 0],
+                obtenerPagina:   fn(int $p) => $servicio->obtenerProductosConStockActualizado($p),
+                persistirPagina: fn($productos) => $this->persistencia->actualizarAlmacenes($productos, $proveedorIdBd),
+                proveedor:       $proveedorClave,
             ),
         ];
     }
@@ -370,12 +407,10 @@ class ProductoSyncOrchestrator
 
     /**
      * Indica si un proveedor específico soporta consulta unificada.
-     * Usado por DespacharActualizacionesJob para optimizar el tipo de job.
      */
     public function proveedorSoportaConsultaUnificada(string $clave): bool
     {
         $servicio = $this->proveedores[strtolower(trim($clave))] ?? null;
-
         return $servicio?->soportaConsultaUnificada() ?? false;
     }
 
@@ -389,17 +424,15 @@ class ProductoSyncOrchestrator
      * Llama a $obtenerPagina($n) por cada ciclo, pasa los productos a
      * $persistirPagina() y acumula los stats hasta que no haya más páginas.
      *
-     * Usado por syncPrecios, syncStock, syncPromociones y syncTodo (separado).
-     *
      * @param  callable(int): SyncPageResult  $obtenerPagina
      * @param  callable(Collection): array    $persistirPagina
      */
     private function iterar(
-        string $contexto,
-        array $statsBase,
+        string   $contexto,
+        array    $statsBase,
         callable $obtenerPagina,
         callable $persistirPagina,
-        string $proveedor,
+        string   $proveedor,
     ): array {
         $stats        = $statsBase;
         $pagina       = 1;
@@ -442,17 +475,17 @@ class ProductoSyncOrchestrator
     /**
      * Loop de syncTodo para proveedores unificados.
      *
-     * Por cada página: 1 HTTP → misma Collection pasa a precios + stock + promos.
-     * Stats acumulados de todas las páginas, separados por tipo.
+     * Por cada página: 1 HTTP → misma Collection pasa a precios + stock +
+     * promos + almacenes. Stats acumulados separados por tipo.
      */
     private function syncTodoUnificado(
         ProveedorSyncInterface $servicio,
-        string $proveedorClave,
-        int $proveedorIdBd,
+        string                 $proveedorClave,
+        int                    $proveedorIdBd,
     ): array {
-        $statsPrecios = ['total' => 0, 'actualizados' => 0, 'sin_cambios' => 0, 'errores' => 0];
-        $statsStock   = ['total' => 0, 'actualizados' => 0, 'sin_cambios' => 0, 'errores' => 0];
-        $statsPromos  = [
+        $statsPrecios   = ['total' => 0, 'actualizados' => 0, 'sin_cambios' => 0, 'errores' => 0];
+        $statsStock     = ['total' => 0, 'actualizados' => 0, 'sin_cambios' => 0, 'errores' => 0];
+        $statsPromos    = [
             'total'                  => 0,
             'creadas'                => 0,
             'stock_actualizado'      => 0,
@@ -461,6 +494,7 @@ class ProductoSyncOrchestrator
             'expiradas_sin_oferta'   => 0,
             'errores'                => 0,
         ];
+        $statsAlmacenes = ['total' => 0, 'actualizados' => 0, 'sin_cambios' => 0, 'errores' => 0];
 
         $pagina       = 1;
         $totalPaginas = null;
@@ -477,17 +511,19 @@ class ProductoSyncOrchestrator
                 $totalPaginas = $resultado->totalPaginas;
             }
 
-            // La misma colección a los 3 métodos — sin HTTP adicional
             $productos = $resultado->productos;
 
-            $this->sumarStats($statsPrecios, $this->persistencia->actualizarPrecios($productos, $proveedorIdBd));
-            $this->sumarStats($statsStock,   $this->persistencia->actualizarStock($productos, $proveedorIdBd));
-            $this->sumarStats($statsPromos,  $this->persistencia->actualizarPromociones($productos, $proveedorIdBd));
+            $this->sumarStats($statsPrecios,   $this->persistencia->actualizarPrecios($productos, $proveedorIdBd));
+            // Stock resumen y detalle siempre juntos — son la misma información
+            $this->sumarStats($statsStock,     $this->persistencia->actualizarStock($productos, $proveedorIdBd));
+            $this->sumarStats($statsAlmacenes, $this->persistencia->actualizarAlmacenes($productos, $proveedorIdBd));
+            $this->sumarStats($statsPromos,    $this->persistencia->actualizarPromociones($productos, $proveedorIdBd));
 
             Log::info("[Orchestrator] syncTodo {$proveedorClave} — pág. {$pagina}/{$totalPaginas}", [
                 'productos' => $productos->count(),
                 'precios'   => $statsPrecios,
                 'stock'     => $statsStock,
+                'almacenes' => $statsAlmacenes,
                 'promos'    => $statsPromos,
             ]);
 
@@ -502,9 +538,10 @@ class ProductoSyncOrchestrator
         $procesadas = $pagina - 1;
 
         return [
-            'precios'     => array_merge($statsPrecios, ['paginas' => $procesadas, 'proveedor' => $proveedorClave]),
-            'stock'       => array_merge($statsStock,   ['paginas' => $procesadas, 'proveedor' => $proveedorClave]),
-            'promociones' => array_merge($statsPromos,  ['paginas' => $procesadas, 'proveedor' => $proveedorClave]),
+            'precios'     => array_merge($statsPrecios,   ['paginas' => $procesadas, 'proveedor' => $proveedorClave]),
+            'stock'       => array_merge($statsStock,     ['paginas' => $procesadas, 'proveedor' => $proveedorClave]),
+            'almacenes'   => array_merge($statsAlmacenes, ['paginas' => $procesadas, 'proveedor' => $proveedorClave]),
+            'promociones' => array_merge($statsPromos,    ['paginas' => $procesadas, 'proveedor' => $proveedorClave]),
         ];
     }
 
@@ -562,7 +599,6 @@ class ProductoSyncOrchestrator
 
     /**
      * Cuenta cuántos DTOs pasarían la validación de precio y moneda.
-     * Permite calcular 'omitidos' sin duplicar la lógica de filtrado.
      */
     private function contarDtosValidos(array $dtos): int
     {
