@@ -64,7 +64,7 @@ class ProductService
     /**
      * Obtener un producto por ID
      */
-    public function getProductoPorId(int $id, Request $request): ?Producto
+    public function getProductoPorId(int $id, Request $request): ?array
     {
          // Detectar si se están solicitando proveedores
         $incluyeProveedores = $request->boolean('include_proveedores') || 
@@ -129,7 +129,7 @@ class ProductService
     /**
      * Buscar por código de barras
      */
-    public function buscarPorCodigoBarras(string $codigoBarras, Request $request): ?Producto
+    public function buscarPorCodigoBarras(string $codigoBarras, Request $request): ?array
     {
         $query = $this->productBaseBuilder();
 
@@ -157,13 +157,14 @@ class ProductService
             }
         }
 
-        return $producto;
+        // like getProductoPorId we map the result to an array (or null)
+        return $producto ? $this->mapProducto($producto) : null;
     }
 
     /**
      * Buscar por UPC
      */
-    public function buscarPorUPC(string $upc, Request $request): ?Producto
+    public function buscarPorUPC(string $upc, Request $request): ?array
     {
         $query = $this->productBaseBuilder();
 
@@ -192,7 +193,7 @@ class ProductService
             }
         }
 
-        return $producto;
+        return $producto ? $this->mapProducto($producto) : null;
     }
 
     /**
