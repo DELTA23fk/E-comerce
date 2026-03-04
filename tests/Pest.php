@@ -12,7 +12,7 @@
 */
 
 pest()->extend(Tests\TestCase::class)
- // ->use(Illuminate\Foundation\Testing\RefreshDatabase::class)
+    ->use(Illuminate\Foundation\Testing\RefreshDatabase::class)
     ->in('Feature');
 
 /*
@@ -41,7 +41,44 @@ expect()->extend('toBeOne', function () {
 |
 */
 
-function something()
-{
-    // ..
+
+/**
+ * 🔐 Helper to create an authenticated test user
+ * Returns user with sanctum token capability
+ */
+function createTestUser(array $attributes = []) {
+    $defaults = [
+        'name' => 'Test User',
+        'email' => 'test@example.com',
+        'password' => bcrypt('password123'),
+    ];
+    
+    return App\Models\User::firstOrCreate(
+        ['email' => $attributes['email'] ?? $defaults['email']],
+        array_merge($defaults, $attributes)
+    );
+}
+
+/**
+ * Helper to create a Producto record along with required foreign models.
+ * Accepts the same attributes you would pass to Producto::create().
+ */
+function createProduct(array $attributes = []) {
+    $marca = App\Models\Marca::firstOrCreate(['nombre' => 'M']);
+    $categoria = App\Models\Categoria::firstOrCreate(['nombre' => 'C']);
+    $sub = App\Models\SubCategoria::firstOrCreate(['nombre' => 'SC']);
+    $familia = App\Models\Familia::firstOrCreate(['nombre' => 'F']);
+    $grupo = App\Models\Grupo::firstOrCreate(['nombre' => 'G']);
+
+    $defaults = [
+        'nombre' => 'default',
+        'descripcion' => 'desc',
+        'marca_id' => $marca->id,
+        'categoria_id' => $categoria->id,
+        'sub_categoria_id' => $sub->id,
+        'familia_id' => $familia->id,
+        'grupo_id' => $grupo->id,
+    ];
+
+    return App\Models\Producto::create(array_merge($defaults, $attributes));
 }
