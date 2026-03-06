@@ -4,6 +4,7 @@ namespace App\Data\Pedidos;
 
 use App\Data\Cva\ArticuloMinimoData;
 use Spatie\LaravelData\Attributes\DataCollectionOf;
+use Spatie\LaravelData\Attributes\Validation\Sometimes;
 use Spatie\LaravelData\Data;
 use Spatie\LaravelData\DataCollection;
 
@@ -15,6 +16,9 @@ class PedidoData extends Data
     public function __construct(
          #[DataCollectionOf(ArticuloMinimoData::class)]
         public DataCollection $productos,
+        #[Sometimes]
+        public ?string $observaciones = null,
+        
     )
     {
         

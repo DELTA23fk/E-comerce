@@ -12,16 +12,19 @@ class Pedido extends Model
     protected $table = 'pedidos';
     
     protected $fillable = [
-        'folio', 
-        'fecha_pedido', 
-        'precio_total', 
-        'precio_total_productos', 
-        'precio_total_envio', 
-        'estatus', 
+        'folio',
+        'fecha_pedido',
+        'observaciones',
+        'precio_total',
+        'precio_total_productos',
+        'precio_total_envio',
+        'moneda_cobro',
+        'estatus',
         'cliente_id',
         // Campos de pago
         'payment_gateway',
-        'payment_id',
+        'gateway_order_id',
+        'gateway_payment_id',
         'payment_status',
         'monto_pagado',
         'monto_reembolsado',

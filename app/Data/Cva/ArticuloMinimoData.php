@@ -12,12 +12,9 @@ use Spatie\LaravelData\DataCollection;
 
 class ArticuloMinimoData extends Data
 {
-    /**
-     * Create a new class instance.
-     */
     public function __construct(
        
-        #[MapInputName("claveProveedorProducto")]
+        #[MapInputName("clave_proveedor")]
         public string $clave,
         #[IntegerType,Min(1)]
         public int $cantidad
