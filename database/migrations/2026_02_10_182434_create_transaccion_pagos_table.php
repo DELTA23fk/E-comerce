@@ -76,10 +76,19 @@ return new class extends Migration
             $table->softDeletes(); // Sin softDeletes: registro contable, nunca se borra.
             // Sin softDeletes: registro contable, nunca se borra.
 
+            // ── Índices ───────────────────────────────────────────────────────
             $table->index(['pedido_id', 'tipo']);
+            $table->index(['pedido_id', 'status']);
             $table->index(['gateway', 'gateway_payment_id']);
+            $table->index(['gateway', 'gateway_order_id']);
             $table->index('gateway_order_id');
+            $table->index('gateway_payment_id');
             $table->index('status');
+            $table->index('created_at');  // útil para reportes contables por fecha
+
+            // Unicidad: no puede haber dos transacciones aprobadas con el mismo payment_id
+            // (previene doble procesamiento de webhooks duplicados)
+            $table->unique(['gateway_payment_id', 'tipo', 'status'], 'uniq_payment_tipo_status');
         });
     }
 

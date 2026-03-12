@@ -52,8 +52,13 @@ return new class extends Migration
             
             $table->timestamps();
             $table->softDeletes();
+            
+             // ── Índices ───────────────────────────────────────────────────────
             $table->index(['pedido_id', 'status']);
+            $table->index(['pedido_id', 'proveedor_id']);
             $table->index('folio_pedido');
+            $table->index('status');
+            $table->index('requiere_atencion_manual');
         });
     }
 

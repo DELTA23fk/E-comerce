@@ -65,6 +65,11 @@ class Pedido extends Model
     {
         return $this->hasMany(TransaccionPago::class);
     }
+     // Necesaria para procesarWebhookPago → TransaccionPago::updateOrCreate
+    public function transaccionesPagos()
+    {
+        return $this->hasMany(TransaccionPago::class);
+    }
 
     public function pagoAprobado(): bool
     {

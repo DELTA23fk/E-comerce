@@ -848,9 +848,9 @@ class CvaProviderOrderService implements ProveedorServiceInterface
     // INTERFAZ
     // =========================================================================
 
-    public function soporta(int $proveedorId): bool
+    public function codigoProveedor(): string
     {
-        return Proveedor::where('codigo_proveedor', 'cva')->where('id', $proveedorId)->exists();
+        return 'cva';
     }
 
     public function obtenerEstatus(string $folioPedido): string

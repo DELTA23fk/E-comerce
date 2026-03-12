@@ -28,37 +28,44 @@ return new class extends Migration
 
             //pagos
             // ── Pasarela de pago ──────────────────────────────────────────────
-            // Identifica qué gateway procesó el pago
-            $table->string('payment_gateway', 20)->nullable();  // 'mercadopago' | 'paypal'
+            // mercadopago | paypal | manual | null (aún no se elige)
+            $table->string('payment_gateway', 20)->nullable();
 
-            // ID de la intención/orden ANTES de que el usuario pague:
-            //   MercadoPago → preference_id   (creado al iniciar checkout)
-            //   PayPal      → order_id        (creado al iniciar checkout)
+            // ID de la preferencia/orden ANTES de que el usuario pague:
+            //   MercadoPago → preference_id
+            //   PayPal      → order_id
             $table->string('gateway_order_id')->nullable();
 
             // ID de la transacción CONFIRMADA después del pago:
-            //   MercadoPago → payment_id      (llega por webhook/redirect)
-            //   PayPal      → capture_id      (llega al capturar la orden)
+            //   MercadoPago → payment_id
+            //   PayPal      → capture_id
             $table->string('gateway_payment_id')->nullable();
 
-            // Estado normalizado entre gateways:
-            //   pending | approved | rejected | refunded | partial_refunded | in_mediation | charged_back
-            $table->string('payment_status')->default('pending');
+            // Estado normalizado de pago:
+            // pending | approved | rejected | refunded | partial_refunded | in_mediation | charged_back
+            $table->string('payment_status', 30)->default('pending');
 
-            $table->decimal('monto_pagado', 10, 2)->default(0);
-            $table->decimal('monto_reembolsado', 10, 2)->default(0);
+            $table->decimal('monto_pagado',       10, 2)->default(0);
+            $table->decimal('monto_reembolsado',  10, 2)->default(0);
             $table->timestamp('fecha_pago')->nullable();
-            //error
+
+            // ── Control de errores ────────────────────────────────────────────
             $table->json('errores_detallados')->nullable();
             $table->boolean('requiere_atencion_manual')->default(false);
+
             
             $table->timestamps();
             $table->softDeletes();
-            $table->index('folio');
+
+           $table->index('folio');
+            $table->index('estatus');
+            $table->index('payment_status');
             $table->index('payment_gateway');
             $table->index('gateway_order_id');
             $table->index('gateway_payment_id');
             $table->index(['cliente_id', 'estatus']);
+            $table->index(['cliente_id', 'payment_status']);
+            $table->index('fecha_pedido');
         });
     }
 

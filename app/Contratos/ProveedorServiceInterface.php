@@ -111,11 +111,6 @@ interface ProveedorServiceInterface
     ): array;
 
     /**
-     * Verificar si este servicio puede manejar el proveedor indicado.
-     */
-    public function soporta(int $proveedorId): bool;
-
-    /**
      * Obtener estatus de un pedido ya creado.
      */
     public function obtenerEstatus(string $folioPedido): string;
@@ -129,4 +124,9 @@ interface ProveedorServiceInterface
      * Nombre legible del proveedor (usado en logs y respuestas de cotización).
      */
     public function obtenerNombre(): string;
+
+    /**
+     * Código identificador del proveedor.
+     */
+    public function codigoProveedor(): string;
 }
