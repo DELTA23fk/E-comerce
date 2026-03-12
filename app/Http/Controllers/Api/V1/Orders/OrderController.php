@@ -18,7 +18,12 @@ class OrderController extends Controller
 
     public function store(PedidoData $request)
     {
-        $pedido = $this->orquestador->crearPedido($request->productos->toArray());
+        $data = array_merge([
+            'productos' => $request->productos->toArray(),
+            'observaciones' => $request->observaciones,
+        ]);
+
+        $pedido = $this->orquestador->crearPedido($data);
 
         return response()->json($pedido, 201);
     }
@@ -36,7 +41,7 @@ class OrderController extends Controller
             if (!$cliente) {
                 return response()->json([
                     'success' => false,
-                    'error' => 'Cliente no encontrado'
+                    'error' => 'El cliente autenticado no tiene un perfil de completo actualizado valido para generar pedidos o cotizaciones de envio.'
                 ], 404);
             }
 

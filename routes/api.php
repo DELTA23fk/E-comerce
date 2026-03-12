@@ -8,6 +8,7 @@ use App\Http\Controllers\Api\V1\Client\ClientController;
 use App\Http\Controllers\Api\V1\FamilyController;
 use App\Http\Controllers\Api\V1\GroupController;
 use App\Http\Controllers\Api\V1\Orders\OrderController;
+use App\Http\Controllers\Api\V1\Payment\PagoController;
 use App\Http\Controllers\Api\V1\Product\ProductCatalogController;
 use App\Http\Controllers\Api\V1\Product\ProductoController;
 use App\Http\Controllers\Api\V1\Product\ProductOfferController;
@@ -16,6 +17,8 @@ use App\Http\Controllers\Api\V1\Product\ProductSearchController;
 use App\Http\Controllers\Api\V1\Product\ProductStockController;
 use App\Http\Controllers\Api\V1\ProviderController;
 use App\Http\Controllers\Api\V1\Seller\SellerController;
+use App\Http\Controllers\Api\V1\Webhooks\MercadoPagoWebhookController;
+use App\Http\Controllers\Api\V1\Webhooks\PayPalWebhookController;
 use App\Http\Controllers\Spa\Auth\AuthController as SpaAuthController;
 use Illuminate\Support\Facades\Route;
 
@@ -30,6 +33,14 @@ Route::prefix('v1')->group(function () {
             Route::post('/auth/register', [SpaAuthController::class, 'register'])->name('spa.auth.register')->middleware('guest');
             Route::post('/auth/login', [SpaAuthController::class, 'login'])->name('spa.auth.login')->middleware('guest');
 
+        });
+        // ── Webhooks (públicos, sin auth, sin CSRF) ───────────────────────────────────
+        Route::prefix('webhooks')->name('webhooks.')->group(function () {
+            Route::post('mercadopago', [MercadoPagoWebhookController::class, 'handle'])
+                ->name('mercadopago');
+
+            Route::post('paypal', [PayPalWebhookController::class, 'handle'])
+                ->name('paypal');
         });
     //-------------------------------------------------------------
 
@@ -287,11 +298,19 @@ Route::prefix('v1')->group(function () {
         //COTIZAR PEDIDOS
         Route::prefix('pedidos')->group(function(){
             Route::post('cotizar/envios/productos',[OrderController::class,'cotizarEnvio']);
-            Route::post('generar',[OrderController::class,'store']);
-            Route::post('{pedido}/confirmar',[OrderController::class,'confirmarPedido']);
+            // Route::post('generar',[OrderController::class,'store']);
+
+//             Route::prefix('pagos')->group(function(){
+
+//                 Route::post('/iniciar',[PagoController::class,'iniciar'])->name('iniciar');
+
+//                 Route::post('/iniciar-manual',[PagoController::class,'iniciarManual'])->name('iniciar-manual');
+
+//                 Route::get('/resultado',[PagoController::class,'resultado'])->name('resultado')->withoutMiddleware(['auth:sanctum']); // MP redirige sin sesión activa
+// ;
+//             });
 
         });
-        //pedido
 
     });
 });

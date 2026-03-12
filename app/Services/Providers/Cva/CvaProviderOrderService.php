@@ -15,31 +15,51 @@ use App\Models\Cliente;
 use App\Models\Proveedor;
 use App\Models\ProveedorEstado;
 use App\Models\ProveedorProducto;
+use App\Models\TipoCambioMoneda;
 use App\Repository\CvaRepository;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
+/**
+ * Servicio de pedidos CVA.
+ *
+ * RESPONSABILIDADES (solo estas):
+ *  - Enriquecer productos con precios y promociones CVA.
+ *  - Validar stock contra almacenes CVA.
+ *  - Distribuir productos por almacén y calcular costo de envío.
+ *  - Crear órdenes en la API de CVA.
+ *  - Descontar stock localmente tras confirmar con CVA.
+ *
+ * NO HACE:
+ *  - Crear Pedido ni PedidoProveedor en base de datos (responsabilidad del orquestador).
+ *  - Conocer el estado del pedido maestro.
+ */
 class CvaProviderOrderService implements ProveedorServiceInterface
 {
-    // Claves oficiales CVA — coinciden con almacenes.almacen_id_externo
+    // Claves oficiales CVA — coinciden con proveedor_almacenes.almacen_id_externo
     private const CLAVE_CEDIS_GDL    = '46';
     private const CLAVE_SUCURSAL_GDL = '1';
     private const PAQUETERIAID       = 4;
     private const CP_CEDIS_GDL       = 45640;
     private const CP_SUCURSAL_GDL    = 44900;
-
-    // Claves de todos los CEDIS CVA
-    private const CLAVES_CEDIS = ['46', '51', '54'];
+    private const CLAVES_CEDIS       = ['46', '51', '54'];
 
     public function __construct(
-        private CvaRepository $cvaRepository
+        private CvaRepository $cvaRepository,
     ) {}
 
     // =========================================================================
     // ENRIQUECIMIENTO
     // =========================================================================
 
+    /**
+     * {@inheritdoc}
+     *
+     * Aplica precios de lista y promociones CVA activas.
+     * Si la promoción tiene stock insuficiente para la cantidad solicitada,
+     * se descarta y se usa el precio regular (se registra en log).
+     */
     public function enriquecerProductos(array $productosBasicos): array
     {
         $claves = collect($productosBasicos)->pluck('codigo_proveedor')->unique()->toArray();
@@ -73,29 +93,70 @@ class CvaProviderOrderService implements ProveedorServiceInterface
 
             $cantidadSolicitada = $productoBasico['cantidad'];
 
+            // Log si hay promociones que no alcanzan el stock mínimo
             $promocionesInsuficientes = $proveedorProducto->promociones
                 ->filter(fn($p) => $p->disponible_en_promocion > 0
                                 && $p->disponible_en_promocion < $cantidadSolicitada);
 
             if ($promocionesInsuficientes->isNotEmpty()) {
-                Log::info('Promoción no aplicada por stock insuficiente', [
+                Log::info('Promoción descartada por stock insuficiente', [
                     'codigo_proveedor'    => $productoBasico['codigo_proveedor'],
                     'cantidad_solicitada' => $cantidadSolicitada,
                     'promociones'         => $promocionesInsuficientes->map(fn($p) => [
                         'clave'                    => $p->clave_promocion,
                         'stock_promo'              => $p->disponible_en_promocion,
-                        'precio_con_descuento'     => $p->precio_con_descuento,
                         'precio_con_descuento_mxn' => $p->precio_con_descuento_mxn,
-                        'moneda_original'          => $p->moneda_precio_original,
                     ])->toArray(),
                 ]);
             }
 
-            return ProductoEnriquecidoData::fromProveedorProducto(
-                $proveedorProducto,
-                $cantidadSolicitada
-            );
+            return ProductoEnriquecidoData::fromProveedorProducto($proveedorProducto, $cantidadSolicitada);
+        })->toArray();
+    }
 
+    /**
+     * Construye ProductoEnriquecidoData básicos para cotización de envío rápida.
+     *
+     * NO aplica precios ni promociones. Solo los campos que CVA necesita para
+     * calcular peso/volumen/flete. El orquestador llama este método en lugar
+     * de enriquecerProductos() cuando el único objetivo es cotizar envío.
+     *
+     * @param  array $productosBasicos  [['codigo_proveedor' => 'XX', 'cantidad' => 2], ...]
+     * @return ProductoEnriquecidoData[]
+     */
+    public function prepararParaCotizacion(array $productosBasicos): array
+    {
+        $claves = collect($productosBasicos)->pluck('codigo_proveedor')->unique()->toArray();
+
+        $productosDb = DB::table('proveedor_productos as pp')
+            ->join('proveedores as prov', 'pp.proveedor_id', '=', 'prov.id')
+            ->where('prov.codigo_proveedor', 'cva')
+            ->whereIn('pp.codigo_proveedor', $claves)
+            ->whereNull('pp.deleted_at')
+            ->select('pp.id', 'pp.codigo_proveedor', 'pp.proveedor_id', 'pp.producto_id', 'pp.stock_total')
+            ->get()
+            ->keyBy('codigo_proveedor');
+
+        return collect($productosBasicos)->map(function ($productoBasico) use ($productosDb) {
+            $row = $productosDb->get($productoBasico['codigo_proveedor']);
+
+            if (!$row) {
+                throw new \App\Exceptions\Orders\ProductNotFoundException($productoBasico['codigo_proveedor']);
+            }
+
+            return new ProductoEnriquecidoData(
+                proveedorProductoId: $row->id,
+                codigoProveedor:     $row->codigo_proveedor,
+                cantidad:            $productoBasico['cantidad'],
+                precioUnitario:      0,
+                precioOriginal:      0,
+                proveedorId:         $row->proveedor_id,
+                productoId:          $row->producto_id,
+                enOferta:            false,
+                descuentoPorcentaje: null,
+                clavePromocion:      null,
+                metadataProveedor:   ['stock_total' => $row->stock_total],
+            );
         })->toArray();
     }
 
@@ -104,14 +165,10 @@ class CvaProviderOrderService implements ProveedorServiceInterface
     // =========================================================================
 
     /**
-     * Valida stock suficiente para cubrir la demanda.
+     * {@inheritdoc}
      *
-     * Si se pasa $almacenPreferido, valida primero contra ese almacén.
-     * Si no tiene stock suficiente se avisa en el log pero NO se lanza excepción
-     * — la distribución se encargará de completar desde otros almacenes.
-     * La excepción solo se lanza si el stock TOTAL (todos los almacenes) es insuficiente.
-     *
-     * @param string|int|null $almacenPreferido  clave externa ('1','46'...) o id interno
+     * Lanza CvaStockException si el stock TOTAL (todos los almacenes) es insuficiente.
+     * Si $almacenPreferido no cubre por sí solo, se registra en log pero no es error fatal.
      */
     public function validarDisponibilidad(array $productos, string|int|null $almacenPreferido = null): bool
     {
@@ -122,18 +179,17 @@ class CvaProviderOrderService implements ProveedorServiceInterface
             if ($stockTotal < $producto->cantidad) {
                 throw new CvaStockException(
                     "Stock insuficiente para {$producto->codigoProveedor}. " .
-                    "Solicitado: {$producto->cantidad}, Disponible total: {$stockTotal}.",
-                    400
+                    "Solicitado: {$producto->cantidad}, disponible: {$stockTotal}.",
+                    400,
                 );
             }
 
-            // Informar si el almacén preferido no tiene stock suficiente por sí solo
             if ($almacenPreferido !== null) {
-                $almacen      = $this->resolverAlmacenPreferido($stockPorAlmacen, $almacenPreferido);
+                $almacen        = $this->resolverAlmacenPreferido($stockPorAlmacen, $almacenPreferido);
                 $stockEnAlmacen = $almacen?->cantidad ?? 0;
 
                 if ($stockEnAlmacen < $producto->cantidad) {
-                    Log::info('Almacén preferido sin stock suficiente, se distribuirá', [
+                    Log::info('Almacén preferido sin stock suficiente — se distribuirá', [
                         'codigo_proveedor'  => $producto->codigoProveedor,
                         'almacen_preferido' => $almacenPreferido,
                         'stock_en_almacen'  => $stockEnAlmacen,
@@ -144,17 +200,13 @@ class CvaProviderOrderService implements ProveedorServiceInterface
             }
 
             if ($producto->enOferta && $producto->clavePromocion) {
-                $stockPromocion = $this->obtenerStockPromocion(
-                    $producto->codigoProveedor,
-                    $producto->clavePromocion
-                );
+                $stockPromocion = $this->obtenerStockPromocion($producto->codigoProveedor, $producto->clavePromocion);
 
                 if ($stockPromocion !== null && $stockPromocion < $producto->cantidad) {
                     throw new CvaStockException(
                         "Stock insuficiente en promoción para {$producto->codigoProveedor}. " .
-                        "Solicitado: {$producto->cantidad}, " .
-                        "Disponible en promoción: {$stockPromocion}.",
-                        400
+                        "Solicitado: {$producto->cantidad}, disponible en promo: {$stockPromocion}.",
+                        400,
                     );
                 }
             }
@@ -164,91 +216,13 @@ class CvaProviderOrderService implements ProveedorServiceInterface
     }
 
     // =========================================================================
-    // PEDIDOS
+    // COTIZACIÓN DE ENVÍO
     // =========================================================================
 
     /**
-     * @param string|int|null $almacenPreferido  Clave externa CVA ('1','46'...) o id interno
-     *                                            de la tabla almacenes. Cuando se especifica,
-     *                                            la distribución intenta despachar desde ese
-     *                                            almacén primero antes de buscar en otros.
-     */
-    public function crearPedido(
-        PedidoProveedorRequestData $request,
-        Cliente                    $cliente,
-        string|int|null            $almacenPreferido = null,
-    ): array {
-        try {
-            $this->validarAlcanceDeEnvio($cliente);
-
-            $productosEnriquecidos = $this->enriquecerProductos($request->productos);
-            $this->validarDisponibilidad($productosEnriquecidos, $almacenPreferido);
-
-            $distribucion   = $this->distribucionStock($productosEnriquecidos, $almacenPreferido);
-            $costoEnvioData = $this->calcularCostoEnvio($distribucion, $cliente);
-
-            if (!$costoEnvioData['success']) {
-                return ['success' => false, 'error' => 'Error al calcular costo de envío'];
-            }
-
-            return DB::transaction(function () use ($request, $cliente, $distribucion, $costoEnvioData) {
-                $envios     = $costoEnvioData['data']['envios'];
-                $respuestas = [];
-
-                $payloadBase = [
-                    'test'          => $request->test ?? true,
-                    'num_oc'        => $request->numeroOrden,
-                    'observaciones' => $request->observaciones ?? '',
-                    'tipo_flete'    => 'FF',
-                    'cotiza_flete'  => $request->cotiza_flete,
-                    'flete'         => $this->formatearDatosEnvio($cliente, $request->datosEnvio),
-                ];
-
-                foreach ($distribucion['por_almacen'] as $clave => $grupo) {
-                    if (empty($grupo['productos'])) continue;
-
-                    $this->descontarStockAlmacen($grupo['productos'], $clave);
-                    $this->descontarStockTotal($grupo['productos']);
-
-                    $response     = $this->cvaRepository->crearOrden(array_merge($payloadBase, [
-                        'codigo_sucursal' => (int) $clave,
-                        'productos'       => $grupo['productos'],
-                    ]));
-
-                    $respuestas[] = $this->mapearRespuestaOrden(
-                        $response,
-                        $envios[$clave] ?? [],
-                        $grupo['nombre']
-                    );
-                }
-
-                return [
-                    'success'  => true,
-                    'data'     => $respuestas,
-                    'metadata' => [
-                        'almacen_preferido'         => $distribucion['almacen_preferido'],
-                        'requiere_envios_multiples' => $distribucion['requiere_envios_multiples'],
-                        'total_envios'              => $costoEnvioData['data']['totales'],
-                        'distribucion'              => $distribucion['distribucion_productos'],
-                    ],
-                ];
-            });
-
-        } catch (CvaStockException $e) {
-            Log::warning('Stock insuficiente en CVA', ['error' => $e->getMessage()]);
-            return ['success' => false, 'error' => $e->getMessage()];
-
-        } catch (CvaApiException | \Exception $e) {
-            Log::error('Error al crear pedido CVA', [
-                'error' => $e->getMessage(),
-                'trace' => $e->getTraceAsString(),
-            ]);
-            return ['success' => false, 'error' => 'Error al procesar pedido con CVA: ' . $e->getMessage()];
-        }
-    }
-
-    /**
-     * @param string|int|null $almacenPreferido  Igual que en crearPedido()
+     * {@inheritdoc}
+     *
+     * Distribuye productos por almacén CVA y cotiza cada envío parcial.
      */
     public function cotizarEnvio(
         array           $productos,
@@ -277,11 +251,12 @@ class CvaProviderOrderService implements ProveedorServiceInterface
                     'envios'                    => $resultado['data']['envios'],
                     'requiere_envios_multiples' => $resultado['data']['requiere_envios_multiples'],
                     'distribucion'              => $resultado['data']['distribucion'],
-                ]
+                ],
             );
 
         } catch (ShippingOutOfRangeException | ShippingQuoteException $e) {
             throw $e;
+
         } catch (\Exception $e) {
             Log::error('Error al cotizar envío CVA', [
                 'productos'        => collect($productos)->map->codigoProveedor->toArray(),
@@ -294,32 +269,124 @@ class CvaProviderOrderService implements ProveedorServiceInterface
     }
 
     // =========================================================================
-    // DISTRIBUCIÓN DE STOCK — núcleo del servicio
+    // CREACIÓN DE PEDIDO
+    // =========================================================================
+
+    /**
+     * {@inheritdoc}
+     *
+     * almacenPreferido viaja dentro de $request->almacenPreferido.
+     *
+     * Devuelve array estandarizado (ver interface para estructura completa).
+     */
+    public function crearPedido(
+        PedidoProveedorRequestData $request,
+        Cliente                    $cliente,
+    ): array {
+        try {
+            $this->validarAlcanceDeEnvio($cliente);
+
+            $productosEnriquecidos = $this->enriquecerProductos($request->productos);
+            $this->validarDisponibilidad($productosEnriquecidos, $request->almacenPreferido);
+
+            $distribucion   = $this->distribucionStock($productosEnriquecidos, $request->almacenPreferido);
+            $costoEnvioData = $this->calcularCostoEnvio($distribucion, $cliente);
+
+            if (!$costoEnvioData['success']) {
+                return ['success' => false, 'error' => 'Error al calcular costo de envío'];
+            }
+
+            return DB::transaction(function () use ($request, $cliente, $distribucion, $costoEnvioData) {
+                $envios      = $costoEnvioData['data']['envios'];
+                $respuestas  = [];
+                $payloadBase = [
+                    'test'          => config('app.env') !== 'production' ? 1 : 0,
+                    'num_oc'        => $request->numeroOrden,
+                    'observaciones' => $request->observaciones ?? '',
+                    'tipo_flete'    => 'FF',
+                    'cotiza_flete'  => 1, 
+                    'flete'         => $this->formatearDatosEnvio($cliente, $request->datosEnvio),
+                ];
+
+                foreach ($distribucion['por_almacen'] as $clave => $grupo) {
+                    if (empty($grupo['productos'])) continue;
+
+                    $this->descontarStockAlmacen($grupo['productos'], $clave);
+                    $this->descontarStockTotal($grupo['productos']);
+
+                    $response     = $this->cvaRepository->crearOrden(array_merge($payloadBase, [
+                        'codigo_sucursal' => (int) $clave,
+                        'productos'       => $grupo['productos'],
+                    ]));
+                    // Validar que la respuesta sea válida y contenga los datos esperados
+                    if (!is_array($response) || empty($response)) {
+                        throw new CvaApiException(
+                            "Respuesta inválida de CVA al crear orden",
+                            400,
+                            ['response' => $response, 'almacen' => $clave]
+                        );
+                    }
+
+                    if (isset($response['error']) || isset($response['result']) && $response['result'] === 0) {
+                        throw new CvaApiException(
+                            "Error en respuesta de CVA: " . ($response['error'] ?? $response['message'] ?? 'Error desconocido'),
+                            400,
+                            $response
+                        );
+                    }
+
+                    if (!isset($response['pedido'])) {
+                        throw new CvaApiException(
+                            "CVA no retornó folio de pedido",
+                            400,
+                            $response
+                        );
+                    }
+                    $respuestas[] = $this->mapearRespuestaOrden($response, $response['flete'] ?? [], $grupo['nombre']);
+                }
+
+                return [
+                    'success'  => true,
+                    'data'     => $respuestas,
+                    'metadata' => [
+                        'almacen_preferido'         => $distribucion['almacen_preferido'],
+                        'requiere_envios_multiples' => $distribucion['requiere_envios_multiples'],
+                        'total_envios'              => $costoEnvioData['data']['totales'],
+                        'distribucion'              => $distribucion['distribucion_productos'],
+                    ],
+                ];
+            });
+
+        } catch (CvaStockException $e) {
+            Log::warning('Stock insuficiente en CVA', ['error' => $e->getMessage()]);
+            return ['success' => false, 'error' => $e->getMessage()];
+
+        } catch (CvaApiException | \Exception $e) {
+            Log::error('Error al crear pedido CVA', ['error' => $e->getMessage(), 'trace' => $e->getTraceAsString()]);
+            return ['success' => false, 'error' => 'Error al procesar pedido con CVA: ' . $e->getMessage()];
+        }
+    }
+
+    // =========================================================================
+    // DISTRIBUCIÓN DE STOCK
     // =========================================================================
 
     /**
      * Determina desde qué almacén(es) se despacha cada producto.
      *
-     * Estrategia por producto (en orden de prioridad):
-     *
-     *   0. Almacén preferido (si se especificó) cubre toda la demanda → usar solo él
-     *   1. CEDIS GDL principal (clave 46) cubre toda la demanda → usar solo él
-     *   2. Otro CEDIS individual (51, 54) cubre toda la demanda → usar ese CEDIS
-     *   3. Distribución: agotar CEDIS primero, luego sucursales
-     *
-     * El almacén preferido se resuelve por clave externa O por id interno.
-     * Si no tiene stock suficiente por sí solo, se usa como punto de partida
-     * en la distribución antes de buscar en otros.
-     *
-     * @param string|int|null $almacenPreferido
+     * Prioridad por producto:
+     *   0. Almacén preferido cubre toda la demanda → solo él
+     *   1. CEDIS GDL principal (clave 46) cubre toda la demanda → solo él
+     *   2. Otro CEDIS (51, 54) cubre toda la demanda → ese CEDIS
+     *   3. Distribución general: agotar CEDIS primero, luego sucursales
      */
     private function distribucionStock(
         array           $productos,
         string|int|null $almacenPreferido = null,
     ): array {
-        $porAlmacen          = [];
-        $detalleDistribucion = [];
-        $requiereMultiples   = false;
+        $porAlmacen           = [];
+        $detalleDistribucion  = [];
+        $requiereMultiples    = false;
         $almacenPreferidoInfo = null;
 
         foreach ($productos as $producto) {
@@ -331,28 +398,19 @@ class CvaProviderOrderService implements ProveedorServiceInterface
                 $almacenRow = $this->resolverAlmacenPreferido($stockPorAlmacen, $almacenPreferido);
 
                 if ($almacenRow && $almacenRow->cantidad >= $demanda) {
-                    $clave              = $almacenRow->almacen_id_externo;
+                    $clave                = $almacenRow->almacen_id_externo;
                     $almacenPreferidoInfo ??= ['clave' => $clave, 'nombre' => $almacenRow->nombre];
 
                     $porAlmacen = $this->agregarAGrupo(
-                        $porAlmacen,
-                        $clave,
-                        $almacenRow->nombre,
-                        (bool) $almacenRow->es_cd,
-                        (int) ($almacenRow->codigo_postal ?? 0),
-                        $producto->codigoProveedor,
-                        $demanda
+                        $porAlmacen, $clave, $almacenRow->nombre,
+                        (bool) $almacenRow->es_cd, (int) ($almacenRow->codigo_postal ?? 0),
+                        $producto->codigoProveedor, $demanda,
                     );
-
-                    $detalleDistribucion[] = $this->detalleDistribucion(
-                        $producto,
-                        [$clave => $demanda],
-                        'preferido'
-                    );
+                    $detalleDistribucion[] = $this->detalleDistribucion($producto, [$clave => $demanda], 'preferido');
                     continue;
                 }
 
-                // Tiene stock parcial → úsalo primero y complementa abajo
+                // Stock parcial en preferido → úsalo primero y complementa
                 if ($almacenRow && $almacenRow->cantidad > 0) {
                     $almacenPreferidoInfo ??= [
                         'clave'  => $almacenRow->almacen_id_externo,
@@ -360,27 +418,16 @@ class CvaProviderOrderService implements ProveedorServiceInterface
                     ];
 
                     $distribuido = $this->distribuirConPreferido(
-                        $stockPorAlmacen,
-                        $almacenRow,
-                        $demanda,
-                        $producto->codigoProveedor,
-                        $porAlmacen
+                        $stockPorAlmacen, $almacenRow, $demanda, $producto->codigoProveedor, $porAlmacen,
                     );
 
-                    $porAlmacen          = $distribuido['por_almacen'];
-                    $detalleDistribucion[] = $this->detalleDistribucion(
-                        $producto,
-                        $distribuido['asignado'],
-                        'preferido-parcial'
-                    );
+                    $porAlmacen            = $distribuido['por_almacen'];
+                    $detalleDistribucion[] = $this->detalleDistribucion($producto, $distribuido['asignado'], 'preferido-parcial');
 
-                    if (count($distribuido['asignado']) > 1) {
-                        $requiereMultiples = true;
-                    }
+                    if (count($distribuido['asignado']) > 1) $requiereMultiples = true;
                     continue;
                 }
 
-                // El almacén preferido no tiene nada → log y caer al flujo normal
                 Log::info('Almacén preferido sin stock, usando flujo normal', [
                     'codigo_proveedor'  => $producto->codigoProveedor,
                     'almacen_preferido' => $almacenPreferido,
@@ -392,20 +439,10 @@ class CvaProviderOrderService implements ProveedorServiceInterface
 
             if ($cedisPrincipal && $cedisPrincipal->cantidad >= $demanda) {
                 $porAlmacen = $this->agregarAGrupo(
-                    $porAlmacen,
-                    self::CLAVE_CEDIS_GDL,
-                    $cedisPrincipal->nombre,
-                    true,
-                    self::CP_CEDIS_GDL,
-                    $producto->codigoProveedor,
-                    $demanda
+                    $porAlmacen, self::CLAVE_CEDIS_GDL, $cedisPrincipal->nombre,
+                    true, self::CP_CEDIS_GDL, $producto->codigoProveedor, $demanda,
                 );
-
-                $detalleDistribucion[] = $this->detalleDistribucion(
-                    $producto,
-                    [self::CLAVE_CEDIS_GDL => $demanda],
-                    'cedis-principal'
-                );
+                $detalleDistribucion[] = $this->detalleDistribucion($producto, [self::CLAVE_CEDIS_GDL => $demanda], 'cedis-principal');
                 continue;
             }
 
@@ -419,42 +456,27 @@ class CvaProviderOrderService implements ProveedorServiceInterface
 
             if ($otroCedis) {
                 $porAlmacen = $this->agregarAGrupo(
-                    $porAlmacen,
-                    $otroCedis->almacen_id_externo,
-                    $otroCedis->nombre,
-                    true,
-                    (int) ($otroCedis->codigo_postal ?? 0),
-                    $producto->codigoProveedor,
-                    $demanda
+                    $porAlmacen, $otroCedis->almacen_id_externo, $otroCedis->nombre,
+                    true, (int) ($otroCedis->codigo_postal ?? 0), $producto->codigoProveedor, $demanda,
                 );
-
-                $detalleDistribucion[] = $this->detalleDistribucion(
-                    $producto,
-                    [$otroCedis->almacen_id_externo => $demanda],
-                    'otro-cedis'
-                );
+                $detalleDistribucion[] = $this->detalleDistribucion($producto, [$otroCedis->almacen_id_externo => $demanda], 'otro-cedis');
                 continue;
             }
 
             // ── 3. Distribución general: CEDIS primero, luego sucursales ──────
             [$porAlmacen, $distribuido, $restante] = $this->distribuirGeneral(
-                $stockPorAlmacen,
-                $demanda,
-                $producto->codigoProveedor,
-                $porAlmacen
+                $stockPorAlmacen, $demanda, $producto->codigoProveedor, $porAlmacen,
             );
 
             if ($restante > 0) {
                 throw new CvaStockException(
                     "No hay stock suficiente en ningún almacén para {$producto->codigoProveedor}. " .
                     "Faltaron: {$restante} unidades.",
-                    400
+                    400,
                 );
             }
 
-            if (count($distribuido) > 1) {
-                $requiereMultiples = true;
-            }
+            if (count($distribuido) > 1) $requiereMultiples = true;
 
             $detalleDistribucion[] = $this->detalleDistribucion($producto, $distribuido, 'distribuido');
         }
@@ -467,12 +489,6 @@ class CvaProviderOrderService implements ProveedorServiceInterface
         ];
     }
 
-    /**
-     * Distribuye empezando por el almacén preferido (stock parcial) y
-     * completa con el flujo general si hace falta.
-     *
-     * @return array{por_almacen: array, asignado: array<string,int>}
-     */
     private function distribuirConPreferido(
         Collection $stockPorAlmacen,
         object     $almacenRow,
@@ -483,40 +499,29 @@ class CvaProviderOrderService implements ProveedorServiceInterface
         $asignado = [];
         $restante = $demanda;
 
-        // Tomar todo lo que tiene el preferido
-        $tomarPreferido                             = min($almacenRow->cantidad, $restante);
-        $asignado[$almacenRow->almacen_id_externo]  = $tomarPreferido;
-        $restante                                  -= $tomarPreferido;
+        $tomarPreferido                            = min($almacenRow->cantidad, $restante);
+        $asignado[$almacenRow->almacen_id_externo] = $tomarPreferido;
+        $restante                                 -= $tomarPreferido;
 
         $porAlmacen = $this->agregarAGrupo(
-            $porAlmacen,
-            $almacenRow->almacen_id_externo,
-            $almacenRow->nombre,
-            (bool) $almacenRow->es_cd,
-            (int) ($almacenRow->codigo_postal ?? 0),
-            $codigoProveedor,
-            $tomarPreferido
+            $porAlmacen, $almacenRow->almacen_id_externo, $almacenRow->nombre,
+            (bool) $almacenRow->es_cd, (int) ($almacenRow->codigo_postal ?? 0),
+            $codigoProveedor, $tomarPreferido,
         );
 
-        // Completar con el flujo general excluyendo el preferido
         if ($restante > 0) {
-            $restanteStock = $stockPorAlmacen
-                ->where('almacen_id_externo', '!=', $almacenRow->almacen_id_externo);
+            $restanteStock = $stockPorAlmacen->where('almacen_id_externo', '!=', $almacenRow->almacen_id_externo);
 
             [$porAlmacen, $distribuido, $restante] = $this->distribuirGeneral(
-                $restanteStock,
-                $restante,
-                $codigoProveedor,
-                $porAlmacen
+                $restanteStock, $restante, $codigoProveedor, $porAlmacen,
             );
 
             $asignado = array_merge($asignado, $distribuido);
 
             if ($restante > 0) {
                 throw new CvaStockException(
-                    "No hay stock suficiente para {$codigoProveedor} incluso usando el almacén preferido. " .
-                    "Faltaron: {$restante} unidades.",
-                    400
+                    "Stock insuficiente para {$codigoProveedor} incluso con almacén preferido. Faltaron: {$restante}.",
+                    400,
                 );
             }
         }
@@ -524,13 +529,6 @@ class CvaProviderOrderService implements ProveedorServiceInterface
         return ['por_almacen' => $porAlmacen, 'asignado' => $asignado];
     }
 
-    /**
-     * Distribución estándar: agota CEDIS en orden descendente de stock,
-     * luego sucursales. Devuelve el estado actualizado de $porAlmacen,
-     * el mapa de asignaciones y las unidades que no se pudieron cubrir.
-     *
-     * @return array{0: array, 1: array<string,int>, 2: int}
-     */
     private function distribuirGeneral(
         Collection $stockPorAlmacen,
         int        $demanda,
@@ -540,52 +538,34 @@ class CvaProviderOrderService implements ProveedorServiceInterface
         $distribuido = [];
         $restante    = $demanda;
 
-        // Primero CEDIS
         foreach ($stockPorAlmacen->whereIn('almacen_id_externo', self::CLAVES_CEDIS)->sortByDesc('cantidad') as $a) {
             if ($restante <= 0 || $a->cantidad <= 0) continue;
 
-            $tomar                              = min($a->cantidad, $restante);
+            $tomar                               = min($a->cantidad, $restante);
             $distribuido[$a->almacen_id_externo] = ($distribuido[$a->almacen_id_externo] ?? 0) + $tomar;
             $restante                           -= $tomar;
-
-            $porAlmacen = $this->agregarAGrupo(
-                $porAlmacen, $a->almacen_id_externo, $a->nombre,
-                true, (int) ($a->codigo_postal ?? 0), $codigoProveedor, $tomar
-            );
+            $porAlmacen = $this->agregarAGrupo($porAlmacen, $a->almacen_id_externo, $a->nombre, true, (int) ($a->codigo_postal ?? 0), $codigoProveedor, $tomar);
         }
 
-        // Luego sucursales
         if ($restante > 0) {
             foreach ($stockPorAlmacen->whereNotIn('almacen_id_externo', self::CLAVES_CEDIS)->sortByDesc('cantidad') as $a) {
                 if ($restante <= 0 || $a->cantidad <= 0) continue;
 
-                $tomar                              = min($a->cantidad, $restante);
+                $tomar                               = min($a->cantidad, $restante);
                 $distribuido[$a->almacen_id_externo] = ($distribuido[$a->almacen_id_externo] ?? 0) + $tomar;
                 $restante                           -= $tomar;
-
-                $porAlmacen = $this->agregarAGrupo(
-                    $porAlmacen, $a->almacen_id_externo, $a->nombre,
-                    false, (int) ($a->codigo_postal ?? 0), $codigoProveedor, $tomar
-                );
+                $porAlmacen = $this->agregarAGrupo($porAlmacen, $a->almacen_id_externo, $a->nombre, false, (int) ($a->codigo_postal ?? 0), $codigoProveedor, $tomar);
             }
         }
 
         return [$porAlmacen, $distribuido, $restante];
     }
 
-    /**
-     * Resuelve el almacén preferido desde la colección de stock del producto.
-     * Acepta clave externa ('1', '46'...) o id interno de la tabla almacenes.
-     */
-    private function resolverAlmacenPreferido(
-        Collection      $stockPorAlmacen,
-        string|int      $almacenPreferido,
-    ): ?object {
-        // Intentar por clave externa primero (string como '1', '46')
+    private function resolverAlmacenPreferido(Collection $stockPorAlmacen, string|int $almacenPreferido): ?object
+    {
         $porClave = $stockPorAlmacen->firstWhere('almacen_id_externo', (string) $almacenPreferido);
         if ($porClave) return $porClave;
 
-        // Intentar por id interno
         return $stockPorAlmacen->firstWhere('almacen_id', (int) $almacenPreferido) ?? null;
     }
 
@@ -593,22 +573,10 @@ class CvaProviderOrderService implements ProveedorServiceInterface
     // HELPERS — AGRUPACIÓN Y DETALLE
     // =========================================================================
 
-    private function agregarAGrupo(
-        array  $porAlmacen,
-        string $clave,
-        string $nombre,
-        bool   $esCd,
-        int    $cp,
-        string $codigoProveedor,
-        int    $cantidad
-    ): array {
+    private function agregarAGrupo(array $porAlmacen, string $clave, string $nombre, bool $esCd, int $cp, string $codigoProveedor, int $cantidad): array
+    {
         if (!isset($porAlmacen[$clave])) {
-            $porAlmacen[$clave] = [
-                'nombre'    => $nombre,
-                'es_cd'     => $esCd,
-                'cp'        => $cp,
-                'productos' => [],
-            ];
+            $porAlmacen[$clave] = ['nombre' => $nombre, 'es_cd' => $esCd, 'cp' => $cp, 'productos' => []];
         }
 
         $encontrado = false;
@@ -622,10 +590,7 @@ class CvaProviderOrderService implements ProveedorServiceInterface
         unset($prod);
 
         if (!$encontrado) {
-            $porAlmacen[$clave]['productos'][] = [
-                'clave'    => $codigoProveedor,
-                'cantidad' => $cantidad,
-            ];
+            $porAlmacen[$clave]['productos'][] = ['clave' => $codigoProveedor, 'cantidad' => $cantidad];
         }
 
         return $porAlmacen;
@@ -673,6 +638,7 @@ class CvaProviderOrderService implements ProveedorServiceInterface
                         'subtotal'           => $cot['subtotal']   ?? 0,
                         'iva'                => $cot['iva']        ?? 0,
                         'monto_total'        => $cot['montoTotal'] ?? 0,
+                        'moneda'             => 'MXN',
                     ];
 
                     $totales['subtotal']    += $cot['subtotal']   ?? 0;
@@ -692,10 +658,7 @@ class CvaProviderOrderService implements ProveedorServiceInterface
             ];
 
         } catch (\Exception $e) {
-            Log::error('Error al calcular costo de envío CVA', [
-                'cliente_id' => $cliente->id,
-                'error'      => $e->getMessage(),
-            ]);
+            Log::error('Error al calcular costo de envío CVA', ['cliente_id' => $cliente->id, 'error' => $e->getMessage()]);
             return ['success' => false, 'message' => 'Error al calcular costo de envío: ' . $e->getMessage()];
         }
     }
@@ -707,43 +670,43 @@ class CvaProviderOrderService implements ProveedorServiceInterface
     private function obtenerStockPorAlmacen(string $codigoProveedor): Collection
     {
         return DB::table('almacen_producto_stock as aps')
-        ->join('proveedor_almacenes as a', 'aps.proveedor_almacen_id', '=', 'a.id')
-        ->join('proveedor_productos as pp', 'aps.proveedor_producto_id', '=', 'pp.id')
-        ->join('proveedores as prov', 'pp.proveedor_id', '=', 'prov.id')
-        ->where('prov.codigo_proveedor', 'cva')
-        ->where('pp.codigo_proveedor', $codigoProveedor)
-        ->where('aps.cantidad', '>', 0)
-        ->whereNull('aps.deleted_at')
-        ->select([
-            'a.id              as almacen_id',
-            'a.almacen_id_externo',
-            'a.nombre',
-            'a.codigo_postal',
-            'a.es_cd',
-            'aps.id            as stock_id',
-            'aps.cantidad',
-        ])
-        ->get();
+            ->join('proveedor_almacenes as a', 'aps.proveedor_almacen_id', '=', 'a.id')
+            ->join('proveedor_productos as pp', 'aps.proveedor_producto_id', '=', 'pp.id')
+            ->join('proveedores as prov', 'pp.proveedor_id', '=', 'prov.id')
+            ->where('prov.codigo_proveedor', 'cva')
+            ->where('pp.codigo_proveedor', $codigoProveedor)
+            ->where('aps.cantidad', '>', 0)
+            ->whereNull('aps.deleted_at')
+            ->select([
+                'a.id              as almacen_id',
+                'a.almacen_id_externo',
+                'a.nombre',
+                'a.codigo_postal',
+                'a.es_cd',
+                'aps.id            as stock_id',
+                'aps.cantidad',
+            ])
+            ->get();
     }
 
     private function descontarStockAlmacen(array $productos, string $claveAlmacen): void
     {
         foreach ($productos as $prod) {
             $actualizado = DB::table('almacen_producto_stock as aps')
-            ->join('proveedor_almacenes as a', 'aps.proveedor_almacen_id', '=', 'a.id') // ← corregido
-            ->join('proveedor_productos as pp', 'aps.proveedor_producto_id', '=', 'pp.id')
-            ->join('proveedores as prov', 'pp.proveedor_id', '=', 'prov.id')
-            ->where('prov.codigo_proveedor', 'cva')
-            ->where('pp.codigo_proveedor', $prod['clave'])
-            ->where('a.almacen_id_externo', $claveAlmacen)
-            ->where('aps.cantidad', '>=', $prod['cantidad'])
-            ->whereNull('aps.deleted_at')
-            ->decrement('aps.cantidad', $prod['cantidad']);
+                ->join('proveedor_almacenes as a', 'aps.proveedor_almacen_id', '=', 'a.id')
+                ->join('proveedor_productos as pp', 'aps.proveedor_producto_id', '=', 'pp.id')
+                ->join('proveedores as prov', 'pp.proveedor_id', '=', 'prov.id')
+                ->where('prov.codigo_proveedor', 'cva')
+                ->where('pp.codigo_proveedor', $prod['clave'])
+                ->where('a.almacen_id_externo', $claveAlmacen)
+                ->where('aps.cantidad', '>=', $prod['cantidad'])
+                ->whereNull('aps.deleted_at')
+                ->decrement('aps.cantidad', $prod['cantidad']);
 
             if (!$actualizado) {
                 throw new CvaStockException(
                     "No se pudo descontar stock del almacén {$claveAlmacen} para {$prod['clave']}.",
-                    500
+                    500,
                 );
             }
         }
@@ -754,11 +717,6 @@ class CvaProviderOrderService implements ProveedorServiceInterface
         ]);
     }
 
-    /**
-     * Descuenta el resumen stock_total en proveedor_productos.
-     * Ya no distingue stock/stock_cd — el total es la única fuente de verdad
-     * para compatibilidad con queries que no usan almacen_producto_stock.
-     */
     private function descontarStockTotal(array $productos): void
     {
         foreach ($productos as $prod) {
@@ -792,83 +750,47 @@ class CvaProviderOrderService implements ProveedorServiceInterface
         }
     }
 
-    private function descontarStockPromocion(string $codigoProveedor, int $cantidad): void
-    {
-        try {
-            $pp = ProveedorProducto::where('codigo_proveedor', $codigoProveedor)->first();
-            if (!$pp) return;
-
-            $promocionActiva = $pp->promociones()
-                ->where('es_oferta', true)
-                ->where(function ($q) {
-                    $q->where(function ($q2) {
-                        $q2->whereNotNull('precio_con_descuento_mxn')
-                           ->where('precio_con_descuento_mxn', '>', 0);
-                    })->orWhere(function ($q2) {
-                        $q2->whereNull('precio_con_descuento_mxn')
-                           ->whereNotNull('precio_con_descuento')
-                           ->where('precio_con_descuento', '>', 0);
-                    });
-                })
-                ->where('disponible_en_promocion', '>=', $cantidad)
-                ->orderByRaw('COALESCE(precio_con_descuento_mxn, precio_con_descuento) ASC')
-                ->first();
-
-            if (!$promocionActiva) return;
-
-            $actualizado = DB::table('proveedor_producto_promociones')
-                ->where('id', $promocionActiva->id)
-                ->where('disponible_en_promocion', '>=', $cantidad)
-                ->decrement('disponible_en_promocion', $cantidad);
-
-            if ($actualizado) {
-                Log::info('Stock de promoción descontado', [
-                    'codigo_proveedor'         => $codigoProveedor,
-                    'clave_promocion'          => $promocionActiva->clave_promocion,
-                    'cantidad'                 => $cantidad,
-                    'precio_con_descuento_mxn' => $promocionActiva->precio_con_descuento_mxn,
-                    'moneda_original'          => $promocionActiva->moneda_precio_original,
-                ]);
-            } else {
-                Log::warning('No se pudo descontar stock de promoción', [
-                    'codigo_proveedor'        => $codigoProveedor,
-                    'cantidad_solicitada'     => $cantidad,
-                    'disponible_en_promocion' => $promocionActiva->disponible_en_promocion,
-                ]);
-            }
-
-        } catch (\Exception $e) {
-            Log::error('Error al descontar stock de promoción', [
-                'codigo_proveedor' => $codigoProveedor,
-                'error'            => $e->getMessage(),
-            ]);
-        }
-    }
-
-    private function precioEfectivoPromocion($promocion): float
-    {
-        return (float) ($promocion->precio_con_descuento_mxn
-            ?? $promocion->precio_con_descuento
-            ?? PHP_FLOAT_MAX);
-    }
-
     // =========================================================================
     // HELPERS — ENVÍO Y VALIDACIONES
     // =========================================================================
 
     private function mapearRespuestaOrden(array $response, array $flete, string $origen): array
     {
+        $moneda = $response['moneda'] ?? 'USD';
+        $precioProductos = (float) ($response['total'] ?? 0);
+        $precioEnvio = (float) ($flete['montoTotal'] ?? 0);
+        $monedaEnvio = $flete['moneda'] ?? 'MXN';
+        $tipoCambio = TipoCambioMoneda::actual();
+
+        // Convertir precios individuales a MXN
+        $precioProductosMxn = (float) self::convertirAMxn((string) $precioProductos, $moneda, $tipoCambio);
+        $precioEnvioMxn = (float) self::convertirAMxn((string) $precioEnvio, $monedaEnvio, $tipoCambio);
+
         return [
-            'folioPedido'  => $response['pedido'],
-            'subtotal'     => $response['subtotal'],
-            'iva'          => $response['iva']           ?? 0,
-            'total'        => $response['total'],
-            'moneda'       => $response['moneda']        ?? 'MXN',
-            'emailAgente'  => $response['email_agente']  ?? null,
-            'emailAlmacen' => $response['email_almacen'] ?? null,
-            'flete'        => $flete,
-            'origen'       => $origen,
+            'folio_pedido'                 => $response['pedido'],
+            'iva_incluido'                 => (bool) ($response['iva'] ?? false),
+            'precio_total_productos'       => $precioProductos,
+            'moneda_cobro_productos'       => $moneda,
+            'email_agente'                 => $response['email_agente'] ?? null,
+            'email_almacen'                => $response['email_almacen'] ?? null,
+            'precio_total_envio'           => $precioEnvio,
+            'moneda_cobro_envio'           => $monedaEnvio,
+            'origen_envio'                 => $origen,
+            'envio_gratis'                 => $precioEnvio == 0,
+            'fecha_entrega_estimada'       => $response['fecha_entrega_estimada'] ?? null,
+            'status'                       => 'en_proceso',
+            'tipo_cambio_aplicado'         => $moneda === 'MXN' ? null : $tipoCambio,
+            'precio_total_productos_mxn'   => $precioProductosMxn,
+            'precio_total_envio_mxn'       => $precioEnvioMxn,
+            'precio_total_mxn'             => $precioProductosMxn + $precioEnvioMxn,
         ];
+    }
+
+    private static function convertirAMxn(string $precio, string $moneda, string $tipoCambio): string
+    {
+        if ($moneda === 'MXN') return $precio;
+
+        return bcmul($precio, $tipoCambio, 4);
     }
 
     private function validarAlcanceDeEnvio(Cliente $cliente): bool
@@ -893,10 +815,7 @@ class CvaProviderOrderService implements ProveedorServiceInterface
         } catch (ShippingOutOfRangeException $e) {
             throw $e;
         } catch (\Exception $e) {
-            Log::error('Error al validar alcance de envío', [
-                'cliente_id' => $cliente->id,
-                'error'      => $e->getMessage(),
-            ]);
+            Log::error('Error al validar alcance de envío', ['cliente_id' => $cliente->id, 'error' => $e->getMessage()]);
             throw new ShippingException('Error al validar alcance de envío', [
                 'cliente_id'     => $cliente->id,
                 'error_original' => $e->getMessage(),
@@ -910,15 +829,16 @@ class CvaProviderOrderService implements ProveedorServiceInterface
         $ciudad = $estado->ciudades()->where('descripcion', strtoupper(trim($cliente->ciudad)))->first();
 
         $flete = [
-            'calle'           => $cliente->calle           ?? '',
-            'numero'          => $cliente->numero_exterior  ?? '',
-            'numero_interior' => $cliente->numero_interior  ?? '',
-            'cp'              => $cliente->codigo_postal    ?? '',
+            'calle'           => $cliente->calle            ?? '',
+            'numero'          => $cliente->numero_exterior   ?? '',
+            'numero_interior' => $cliente->numero_interior   ?? '',
+            'cp'              => $cliente->codigo_postal     ?? '',
             'estado'          => (int) $estado->clave,
             'ciudad'          => (int) $ciudad->clave,
             'paqueteria'      => self::PAQUETERIAID,
-            'atencion'        => $cliente->nombre           ?? '',
-            'colonia'         => $cliente->colonia          ?? '',
+            'atencion'        => $cliente->nombre            ?? '',
+            'colonia'         => $cliente->colonia           ?? '',
+            'atencion' => 'nxtit'
         ];
 
         return $datosEnvio ? array_merge($flete, $datosEnvio) : $flete;
@@ -928,9 +848,9 @@ class CvaProviderOrderService implements ProveedorServiceInterface
     // INTERFAZ
     // =========================================================================
 
-    public function soporta(int $proveedorId): bool
+    public function codigoProveedor(): string
     {
-        return Proveedor::where('codigo_proveedor', 'cva')->where('id', $proveedorId)->exists();
+        return 'cva';
     }
 
     public function obtenerEstatus(string $folioPedido): string

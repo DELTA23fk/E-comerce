@@ -2,6 +2,9 @@
 
 namespace App\Providers;
 
+use App\Factories\PaymentGatewayFactory;
+use App\Factories\ProviderFactory;
+use App\Services\Orders\OrchestratorOrdersService;
 use App\Services\ProductCatalogService;
 use App\Services\ProductFilterService;
 use App\Services\ProductOfferService;
@@ -46,6 +49,27 @@ class AppServiceProvider extends ServiceProvider
                 ],
             );
         });
+
+          // ── Servicios de proveedores ─────────────────────────────────────────
+        // No se declaran singleton explícitamente.
+        // Al ser inyectados en ProviderFactory (singleton), Laravel los resuelve
+        // una sola vez y viven el mismo ciclo de vida que el factory.
+        // Si se añade un nuevo proveedor, solo se inyecta aquí — nada más cambia.
+
+        // ── ProviderFactory ──────────────────────────────────────────────────
+        // Singleton seguro: $mapa es lazy y se construye una vez.
+        // Los servicios inyectados no tienen estado mutable en $this.
+        $this->app->singleton(ProviderFactory::class);
+
+        // ── PaymentGatewayFactory ────────────────────────────────────────────
+        // Singleton seguro: solo lee config, no tiene estado mutable.
+        $this->app->singleton(PaymentGatewayFactory::class);
+
+        // ── OrchestratorOrdersService ────────────────────────────────────────
+        // Singleton seguro: solo guarda los dos factories (readonly).
+        // Todo el estado de cada pedido viaja como parámetros de método.
+        $this->app->singleton(OrchestratorOrdersService::class);
+
     }
 
     /**

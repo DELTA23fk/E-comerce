@@ -1,0 +1,122 @@
+services:
+
+  # ── PHP / Laravel ─────────────────────────────────────────────────────────
+  app:
+    build:
+      context: .
+      dockerfile: docker/php/Dockerfile
+    container_name: nxtit_app
+    restart: unless-stopped
+    working_dir: /var/www
+    volumes:
+      - .:/var/www
+      - ./docker/php/php.ini:/usr/local/etc/php/conf.d/custom.ini
+    environment:
+      - APP_ENV=${APP_ENV:-local}
+      - APP_URL=${APP_URL:-http://localhost}
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    networks:
+      - nxtit
+
+  # ── Nginx ─────────────────────────────────────────────────────────────────
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: nxtit_nginx
+    restart: unless-stopped
+    ports:
+      - "8000:80"
+    volumes:
+      - .:/var/www
+      - ./docker/nginx/default.conf:/etc/nginx/conf.d/default.conf
+    depends_on:
+      - app
+    networks:
+      - nxtit
+
+  # ── MySQL ─────────────────────────────────────────────────────────────────
+  mysql:
+    image: mysql:8.0
+    container_name: nxtit_mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-root}
+      MYSQL_DATABASE:      ${DB_DATABASE:-nxtit}
+      MYSQL_USER:          ${DB_USERNAME:-nxtit}
+      MYSQL_PASSWORD:      ${DB_PASSWORD:-secret}
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${DB_ROOT_PASSWORD:-root}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - nxtit
+
+  # ── Redis ─────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: nxtit_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - nxtit
+
+  # ── Queue Worker ──────────────────────────────────────────────────────────
+  queue:
+    build:
+      context: .
+      dockerfile: docker/php/Dockerfile
+    container_name: nxtit_queue
+    restart: unless-stopped
+    working_dir: /var/www
+    command: php artisan queue:work --sleep=3 --tries=3 --timeout=90
+    volumes:
+      - .:/var/www
+    depends_on:
+      - app
+      - redis
+    networks:
+      - nxtit
+
+  # ── Cloudflare Tunnel (webhook público sin ngrok) ──────────────────────────
+  # Expone nginx:80 públicamente con una URL HTTPS automática.
+  # La URL se imprime en los logs al iniciar:
+  #   docker-compose logs cloudflared
+  #
+  # Sin cuenta: URL temporal que cambia al reiniciar.
+  # Con cuenta gratuita + CLOUDFLARE_TOKEN: URL fija en tu dominio.
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: nxtit_tunnel
+    restart: unless-stopped
+    # Sin token → quick tunnel (URL aleatoria, caduca en 24h, suficiente para dev)
+    # Con token → tunnel persistente (ver README)
+    command: >
+      tunnel
+      ${CLOUDFLARE_TOKEN:+--token ${CLOUDFLARE_TOKEN}}
+      ${CLOUDFLARE_TOKEN:+run}
+      ${CLOUDFLARE_TOKEN:-–url http://nginx:80}
+    environment:
+      - TUNNEL_URL=http://nginx:80
+    depends_on:
+      - nginx
+    networks:
+      - nxtit
+
+volumes:
+  mysql_data:
+  redis_data:
+
+networks:
+  nxtit:
+    driver: bridge
