@@ -1,5 +1,6 @@
 <?php
 
+use App\Jobs\ActualizarTipoCambioJob;
 use App\Jobs\DespacharActualizacionesJob;
 use Illuminate\Foundation\Inspiring;
 use Illuminate\Support\Facades\Artisan;
@@ -23,4 +24,8 @@ Schedule::job(new DespacharActualizacionesJob('promociones'), 'sync')
 
 Schedule::job(new DespacharActualizacionesJob('todo'), 'sync')
     ->dailyAt('02:00')
+    ->withoutOverlapping(120);
+
+Schedule::job(new ActualizarTipoCambioJob(),'default')
+    ->daily()
     ->withoutOverlapping(120);

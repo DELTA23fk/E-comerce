@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Api\V1\Payment;
 
+use App\Data\Pedidos\PedidoData;
 use App\Exceptions\InvalidPaymentStateException;
 use App\Exceptions\PaymentGatewayException;
 use App\Http\Controllers\Controller;
@@ -22,22 +23,13 @@ class PagoController extends Controller
      * POST /pagos/iniciar
      * Inicia el flujo de pago con una pasarela externa.
      */
-    public function iniciar(Request $request): JsonResponse
+    public function iniciar(PedidoData $request): JsonResponse
     {
-        $data = $request->validate([
-            'folio'   => ['required', 'string', 'exists:pedidos,folio'],
-            'gateway' => ['required', 'string', Rule::in(['mercadopago', 'paypal'])],
-        ]);
-
-        $pedido = Pedido::where('folio', $data['folio'])->firstOrFail();
-
-        // Autorización: el pedido debe pertenecer al cliente del usuario autenticado
-        if ($pedido->cliente_id !== $request->user()->cliente?->id) {
-            return response()->json(['message' => 'No autorizado.'], 403);
-        }
-
         try {
-            $resultado = $this->orchestrator->iniciarPago($pedido, $data['gateway']);
+            $resultado = $this->orchestrator->realizarPedidoConPago(
+                $request,
+                $request->metodoPago->value,
+            );
 
             return response()->json([
                 'success'          => true,
@@ -51,11 +43,15 @@ class PagoController extends Controller
 
         } catch (PaymentGatewayException $e) {
             Log::error('[PagoController] Error al iniciar pago', [
-                'pedido_id' => $pedido->id,
-                'gateway'   => $data['gateway'],
-                'error'     => $e->getMessage(),
+                'gateway' => $request->metodoPago->value,  // ← antes usaba $pedido->id y $data que no existen
+                'error'   => $e->getMessage(),
+                'context' => $e->context,                  // pedido_id viene en el context si el pedido sí se creó
             ]);
-            return response()->json(['success' => false, 'message' => 'No se pudo conectar con la pasarela de pago.'], 502);
+            return response()->json([
+                'success'   => false,
+                'message'   => 'No se pudo conectar con la pasarela de pago.',
+                'pedido_id' => $e->context['pedido_id'] ?? null, // para reintentar si el pedido sí se creó
+            ], 502);
         }
     }
 
@@ -97,11 +93,14 @@ class PagoController extends Controller
     public function resultado(Request $request): JsonResponse
     {
         $folio  = $request->query('folio');
-        $status = $request->query('status', 'pending');   // success | failure | pending
+        $status = $request->query('status', 'pending');
 
-        $pedido = $folio ? Pedido::where('folio', $folio)->first() : null;
+        $pedido = $folio
+            ? Pedido::where('folio', $folio)->first()
+            : null;
 
-        // Verificar que el pedido pertenece al usuario (si existe y hay auth)
+        // Verificar autorización solo si hay sesión activa
+        // MP puede redirigir sin que el usuario esté autenticado en tu app
         if ($pedido && $request->user() && $pedido->cliente_id !== $request->user()->cliente?->id) {
             return response()->json(['message' => 'No autorizado.'], 403);
         }
@@ -109,6 +108,8 @@ class PagoController extends Controller
         return response()->json([
             'folio'          => $folio,
             'status_gateway' => $status,
+            // El estado REAL viene de la BD — no del status del query string
+            // porque MP puede redirigir a success antes de que el webhook llegue
             'payment_status' => $pedido?->payment_status ?? 'pending',
             'estatus_pedido' => $pedido?->estatus        ?? 'desconocido',
             'mensaje'        => match ($status) {
