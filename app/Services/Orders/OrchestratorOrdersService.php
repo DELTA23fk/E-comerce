@@ -4,6 +4,7 @@ namespace App\Services\Orders;
 
 use App\Data\Payment\PreferenceResponseData;
 use App\Data\Payment\WebhookResultData;
+use App\Data\Pedidos\PedidoData;
 use App\Data\Pedidos\PedidoProveedorRequestData;
 use App\Exceptions\InvalidPaymentStateException;
 use App\Exceptions\Orders\ClientProfileNotFoundException;
@@ -11,6 +12,7 @@ use App\Exceptions\Orders\InvalidOrderStateException;
 use App\Exceptions\Orders\ProductNotFoundException;
 use App\Exceptions\Orders\ShippingOutOfRangeException;
 use App\Exceptions\Orders\ShippingQuoteException;
+use App\Exceptions\PaymentGatewayException;
 use App\Factories\PaymentGatewayFactory;
 use App\Factories\ProviderFactory;
 use App\Models\Cliente;
@@ -45,7 +47,53 @@ class OrchestratorOrdersService
         private readonly ProviderFactory       $proveedorFactory,
         private readonly PaymentGatewayFactory $paymentGatewayFactory,
     ) {}
+    
+    public function realizarPedidoConPago(PedidoData $datos, string $gateway = 'mercadopago'): array
+{
+    // Fase 1 — tiene su propia transacción DB
+    $pedido = $this->crearPedido([
+        'productos'     => $datos->productos->toArray(),
+        'observaciones' => $datos->observaciones ?? null,
+    ]);
 
+    // Fase 1.5 — fuera de transacción DB porque llama API externa
+    try {
+        return $this->iniciarPago($pedido, $gateway);
+
+    } catch (\Throwable $e) {
+        // El pedido existe en BD en estado 'pendiente_pago'
+        // Lo marcamos para que el cliente o admin pueda reintentar
+        $pedido->update([
+            'payment_status'           => 'gateway_error',
+            'requiere_atencion_manual' => true,
+            'errores_detallados'       => json_encode([
+                'fase'      => 'iniciar_pago',
+                'gateway'   => $gateway,
+                'mensaje'   => $e->getMessage(),
+                'timestamp' => now()->toDateTimeString(),
+            ]),
+        ]);
+
+        Log::error('[Orchestrator] Pedido creado pero gateway falló', [
+            'pedido_id' => $pedido->id,
+            'folio'     => $pedido->folio,
+            'gateway'   => $gateway,
+            'error'     => $e->getMessage(),
+        ]);
+
+        // Re-lanzar con el pedido_id para que el controller
+        // lo devuelva al frontend y permita reintentar
+        throw new PaymentGatewayException(
+            $gateway,
+            $e->getMessage(),
+            [
+                'pedido_id' => $pedido->id,
+                'folio'     => $pedido->folio,
+            ],
+            $e,
+        );
+    }
+}
     // =========================================================================
     // FASE 1 — Crear pedido maestro (antes del pago)
     // =========================================================================
@@ -54,7 +102,7 @@ class OrchestratorOrdersService
      * Crea el pedido maestro sin procesar subpedidos con proveedores.
      * Calcula totales (productos + envío) y persiste DetallePedido en estado pendiente.
      *
-     * @param  array            $datos             ['productos' => [...], 'datos_envio' => [...], 'observaciones' => '...']
+     * @param  array            $datos             ['productos' => [...], 'datos_envio' => [...], 'observaciones' => '...','metodoPago' => '...]
      * @param  string|int|null  $almacenPreferido
      *
      * @throws ClientProfileNotFoundException
@@ -88,8 +136,15 @@ class OrchestratorOrdersService
                 $todosLosProductosEnriquecidos = array_merge($todosLosProductosEnriquecidos, $enriquecidos);
             }
 
+            $intentos = 0;
+            do {
+                $folio = $this->generarFolio();
+                $existe = DB::table('pedidos')->where('folio', $folio)->exists();
+                $intentos++;
+            } while ($existe);
+
             $pedido = Pedido::create([
-                'folio'                  => $this->generarFolio(),
+                'folio'                  => $folio,
                 'fecha_pedido'           => now(),
                 'estatus'                => 'pendiente_pago',
                 'cliente_id'             => $cliente->id,
@@ -308,6 +363,33 @@ class OrchestratorOrdersService
         // Ignorar eventos no relevantes (merchant_orders, etc.)
         if ($resultado->tipoEvento === 'other') {
             return false;
+        }
+
+        // Si el webhook llegó pero el estado es ambiguo (pending/in_process),
+        // verificar directamente con el gateway el estado real antes de procesar
+        if (in_array($resultado->status, ['pending', 'in_process'], true)) {
+            try {
+                $statusActual = $gatewayService->verificarPago($resultado->gatewayPaymentId);
+
+                // Si verificando directamente sigue pending, no hacer nada todavía
+                // MP enviará otro webhook cuando el estado cambie
+                if (!$statusActual->aprobado()) {
+                    Log::info('[Orchestrator] Pago aún no aprobado — esperando confirmación', [
+                        'gateway'    => $gateway,
+                        'payment_id' => $resultado->gatewayPaymentId,
+                        'status'     => $statusActual->status,
+                    ]);
+                    return false;
+                }
+
+                // El pago ya está aprobado según la API directa — continuar
+            } catch (\Throwable $e) {
+                // Si falla la verificación directa, continuar con lo que trajo el webhook
+                Log::warning('[Orchestrator] No se pudo verificar pago directamente', [
+                    'payment_id' => $resultado->gatewayPaymentId,
+                    'error'      => $e->getMessage(),
+                ]);
+            }
         }
 
         // Idempotencia: si ya existe una transacción aprobada con este payment_id, ignorar
@@ -861,6 +943,10 @@ class OrchestratorOrdersService
 
     private function generarFolio(): string
     {
-        return 'NXTPED-' . now()->format('Ymd') . '-' . rand(1000, 9999);
+        return sprintf(
+            'NXTITPED-%s-%s',
+            now()->format('Ymd'),
+            strtoupper(substr(uniqid(), -6))
+        );
     }
 }

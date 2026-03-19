@@ -298,17 +298,17 @@ Route::prefix('v1')->group(function () {
         //COTIZAR PEDIDOS
         Route::prefix('pedidos')->group(function(){
             Route::post('cotizar/envios/productos',[OrderController::class,'cotizarEnvio']);
-            // Route::post('generar',[OrderController::class,'store']);
 
-//             Route::prefix('pagos')->group(function(){
+            Route::prefix('pagos')->group(function(){
 
-//                 Route::post('/iniciar',[PagoController::class,'iniciar'])->name('iniciar');
+                Route::post('/iniciar',[PagoController::class,'iniciar'])->name('iniciar');
 
-//                 Route::post('/iniciar-manual',[PagoController::class,'iniciarManual'])->name('iniciar-manual');
+                // Route::post('/iniciar-manual',[PagoController::class,'iniciarManual'])->name('iniciar-manual');
 
-//                 Route::get('/resultado',[PagoController::class,'resultado'])->name('resultado')->withoutMiddleware(['auth:sanctum']); // MP redirige sin sesión activa
-// ;
-//             });
+                Route::get('/resultado',[PagoController::class,'resultado'])->name('resultado')->withoutMiddleware(['auth:sanctum']); // MP redirige sin sesión activa
+;
+            });
+
 
         });
 

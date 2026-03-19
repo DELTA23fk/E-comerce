@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Api\V1\Webhooks;
 
+use App\Exceptions\PaymentGatewayException;
 use App\Exceptions\PaymentWebhookException;
 use App\Http\Controllers\Controller;
 use App\Services\Orders\OrchestratorOrdersService;
@@ -43,13 +44,12 @@ class MercadoPagoWebhookController extends Controller
         $payload = $request->json()->all();
         $headers = $request->headers->all();
 
-        // Normalizar headers a string (algunos vienen como array)
         $headersNormalizados = collect($headers)
             ->map(fn($v) => is_array($v) ? ($v[0] ?? '') : $v)
             ->toArray();
 
         Log::info('[Webhook/MercadoPago] Webhook recibido', [
-            'type'       => $payload['type']    ?? $payload['topic'] ?? 'unknown',
+            'type'       => $payload['type']       ?? $payload['topic'] ?? 'unknown',
             'data_id'    => $payload['data']['id'] ?? null,
             'request_id' => $headersNormalizados['x-request-id'] ?? null,
         ]);
@@ -61,17 +61,19 @@ class MercadoPagoWebhookController extends Controller
                 headers: $headersNormalizados,
             );
 
-            $mensaje = $procesado ? 'Webhook procesado' : 'Webhook ignorado (evento no relevante o duplicado)';
+            $mensaje = $procesado
+                ? 'Webhook procesado'
+                : 'Webhook ignorado (evento no relevante o duplicado)';
 
             Log::info("[Webhook/MercadoPago] {$mensaje}", [
                 'data_id' => $payload['data']['id'] ?? null,
             ]);
 
-            // MercadoPago necesita 200 sí o sí, aunque el evento sea ignorado
             return response('OK', 200);
 
         } catch (PaymentWebhookException $e) {
-            // Firma inválida o payload malformado → 400 para que MP no reintente
+            // Firma inválida o payload malformado → 400
+            // MP NO debe reintentar — el request está genuinamente mal formado
             Log::warning('[Webhook/MercadoPago] Webhook inválido', [
                 'error'   => $e->getMessage(),
                 'payload' => $payload,
@@ -79,8 +81,18 @@ class MercadoPagoWebhookController extends Controller
 
             return response('Bad Request', 400);
 
+        } catch (PaymentGatewayException $e) {
+            // Pago no encontrado, API de MP caída, timeout, ID ficticio del simulador
+            // → 200 para que MP NO reintente (no es culpa del request)
+            Log::warning('[Webhook/MercadoPago] No se pudo procesar pago', [
+                'error'   => $e->getMessage(),
+                'data_id' => $payload['data']['id'] ?? null,
+            ]);
+
+            return response('OK', 200);
+
         } catch (\Throwable $e) {
-            // Error inesperado → 500 para que MP reintente
+            // Error inesperado nuestro → 500 para que MP sí reintente
             Log::error('[Webhook/MercadoPago] Error inesperado', [
                 'error' => $e->getMessage(),
                 'trace' => $e->getTraceAsString(),

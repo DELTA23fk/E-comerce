@@ -48,7 +48,7 @@ class MercadoPagoGateway implements PaymentGatewayInterface
 
     public function __construct(
         private readonly string  $accessToken,
-        private readonly bool    $sandbox        = false,
+        private readonly bool    $sandbox        = true,
         private readonly ?string $webhookSecret  = null,
     ) {
         // El SDK usa configuración global por proceso.
@@ -143,14 +143,14 @@ class MercadoPagoGateway implements PaymentGatewayInterface
                 ],
             ],
             'back_urls' => [
-                'success' => "{$baseUrl}/Api/v1/pedidos/pagos/resultado?status=success&folio={$pedido->folio}",
-                'failure' => "{$baseUrl}/Api/v1/pedidos/pagos/resultado?status=failure&folio={$pedido->folio}",
-                'pending' => "{$baseUrl}/Api/v1/pedidos/pagos/resultado?status=pending&folio={$pedido->folio}",
+                'success' => "{$baseUrl}/api/v1/pedidos/pagos/resultado?status=success&folio={$pedido->folio}",
+                'failure' => "{$baseUrl}/api/v1/pedidos/pagos/resultado?status=failure&folio={$pedido->folio}",
+                'pending' => "{$baseUrl}/api/v1/pedidos/pagos/resultado?status=pending&folio={$pedido->folio}",
             ],
             'auto_return'          => 'approved',
             'notification_url'     => "{$baseUrl}/webhooks/mercadopago",
             'external_reference'   => $pedido->folio,
-            'statement_descriptor' => config('app.name', 'Tienda'),
+            'statement_descriptor' => config('app.name', 'Todo para oficinas'),
             'expires'              => true,
             'expiration_date_to'   => now()->addHours(24)->toIso8601String(),
             'metadata' => [
@@ -218,9 +218,10 @@ class MercadoPagoGateway implements PaymentGatewayInterface
             $payment = $client->get((int) $paymentId);
 
         } catch (MPApiException $e) {
-            throw new PaymentWebhookException(
+            throw new PaymentGatewayException(
                 self::NOMBRE,
                 "No se pudo consultar pago {$paymentId}: {$e->getMessage()}",
+                ['status' => $e->getApiResponse()?->getStatusCode()],
                 $e,
             );
         }
