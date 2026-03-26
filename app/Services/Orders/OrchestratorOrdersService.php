@@ -40,6 +40,11 @@ use Illuminate\Support\Facades\Request;
  *  - Lógica de stock, distribución por almacén ni cálculo de fletes.
  *  - Queries directas a tablas de stock o precios.
  *  - Lógica específica de ningún proveedor ni gateway.
+ *  - LA PRIORIDAD DE LOS ALMACENES, CEDIS O SUCURSALES AL MOMENTO DE LOS PEDIDOS SE REALIZA EN EL  
+ *    CODIGO O CLASE DEL PROVEEDOR EN SU ESTRATEGIA QUE SE IMPLEMENTA EN CADA UNO DE LOS    
+ *    PROVEEDORES Y SUS APIS, YA QUE EL GUARDADO SE REALIZA DE FORMA AUTOMATICA Y NO HAY MODO DE  
+ *    REALIZAR UNA ASIGNACION EN ESE PROCESO. 
+ *  
  */
 class OrchestratorOrdersService
 {
@@ -941,12 +946,14 @@ class OrchestratorOrdersService
         ]);
     }
 
+    //ejemplo de resultado: NXTITPED-20260326-F3A91D0E
     private function generarFolio(): string
     {
         return sprintf(
-            'NXTITPED-%s-%s',
-            now()->format('Ymd'),
-            strtoupper(substr(uniqid(), -6))
+            'NXTITPED-%s-%s',        //NXTITPED-: Identificador de tipo de registro (Fijo).
+            now()->format('Ymd'),         //20260326: La fecha de hoy ($Ymd$).
+            strtoupper(bin2hex(random_bytes(4)))         //F3A91D0E: 8 caracteres hexadecimales generados de forma aleatoria e impredecible para que los pedidos generados no puedan coincidir si se crean en tiempos muy similares y evitar duplicadosp
+
         );
     }
 }
