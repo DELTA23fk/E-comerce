@@ -5,6 +5,7 @@ use App\Http\Controllers\Api\V1\Auth\AuthController as ApiAuthController;
 use App\Http\Controllers\Api\V1\BrandController;
 use App\Http\Controllers\Api\V1\CategoryController;
 use App\Http\Controllers\Api\V1\Client\ClientController;
+use App\Http\Controllers\Api\V1\Collaborator\CollaboratorController;
 use App\Http\Controllers\Api\V1\FamilyController;
 use App\Http\Controllers\Api\V1\GroupController;
 use App\Http\Controllers\Api\V1\Orders\OrderController;
@@ -286,6 +287,15 @@ Route::prefix('v1')->group(function () {
                 ->name('usuarios.rol.update');
             Route::delete('usuarios/{usuarioId}/rol', [ManagerUserController::class, 'removeRole'])
                 ->name('usuarios.rol.destroy');
+
+            //COLLABORATORS
+            Route::prefix('colaboradores')->controller(CollaboratorController::class)->group(function(){
+                Route::get('/','index');
+                Route::get('/{id}','show');
+                Route::post('/','store');
+                Route::match(['put','patch'],'/{id}','update');
+                Route::delete('/{id}','destroy');
+            });
         });
 
         //vendedor
@@ -308,7 +318,6 @@ Route::prefix('v1')->group(function () {
                 Route::get('/resultado',[PagoController::class,'resultado'])->name('resultado')->withoutMiddleware(['auth:sanctum']); // MP redirige sin sesión activa
 ;
             });
-
 
         });
 
