@@ -14,7 +14,8 @@ class Proveedor extends Model
     protected $fillable = [
         'codigo_proveedor',
         'nombre',
-        'activo'
+        'activo',
+        'porcentaje_utilidad'
     ];
 
     protected $hidden = [
@@ -28,7 +29,8 @@ class Proveedor extends Model
         return [
             'codigo_proveedor' => 'string',
             'nombre' => 'string',
-            'activo' => 'boolean'
+            'activo' => 'boolean',
+            'porcentaje_utilidad' => 'integer'
         ];
     }
 

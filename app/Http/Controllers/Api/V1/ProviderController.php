@@ -79,6 +79,7 @@ class ProviderController extends Controller
             'codigo_proveedor' => 'sometimes|string|max:100|unique:proveedores,codigo_proveedor,' . $proveedor->id,
             'nombre'           => 'sometimes|string|max:255',
             'activo'           => 'sometimes|boolean',
+            'porcentaje_utilidad' => 'sometimes|integer|min:0|max:100',
         ]);
 
         $proveedor = $this->proveedorService->update($proveedor, $validated);
@@ -116,5 +117,33 @@ class ProviderController extends Controller
         $this->proveedorService->refreshCache();
 
         return response()->json(['message' => 'Caché de proveedores refrescado correctamente.']);
+    }
+
+    public function actualizarPrecioVentaProveedor(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'nuevo_porcentaje_utilidad' => 'required|integer|min:0|max:100',
+            'proveedor_id' => 'required|integer|exists:proveedores,id',
+        ],[
+            'nuevo_porcentaje_utilidad.required' => 'El nuevo porcentaje de utilidad es obligatorio.',
+            'nuevo_porcentaje_utilidad.integer' => 'El nuevo porcentaje de utilidad debe ser un número entero.',
+            'nuevo_porcentaje_utilidad.min' => 'El nuevo porcentaje de utilidad no puede ser menor a 0.',
+            'nuevo_porcentaje_utilidad.max' => 'El nuevo porcentaje de utilidad no puede ser mayor a 100.',
+            'proveedor_id.required' => 'El ID del proveedor es obligatorio.',
+            'proveedor_id.integer' => 'El ID del proveedor debe ser un número entero.',
+            'proveedor_id.exists' => 'El proveedor especificado no existe.',
+        ]);
+
+        $data = $validated['nuevo_porcentaje_utilidad'];
+        $proveedorId = $validated['proveedor_id'];
+
+        $this->proveedorService->updatePrecioVentaDeProductosRelacionados(
+            $proveedorId,
+            $data
+        );
+
+        return response()->json([
+            'message' => 'Actualización de precios iniciada. Los cambios se aplicarán en breve.',
+        ]);
     }
 }
