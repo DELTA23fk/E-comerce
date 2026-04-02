@@ -2,9 +2,13 @@
 
 namespace App\Services\Providers;
 
+use App\Factories\ProductoFactory;
+use App\Jobs\ActualizarPrecioVentaProveedorJob;
 use App\Models\Proveedor;
+use App\Models\ProveedorProducto;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Cache;
+use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 
 class ProviderService
 {
@@ -85,6 +89,19 @@ class ProviderService
         $this->refreshCache();
 
         return $proveedor->fresh();
+    }
+
+    /**
+     * Despacha un job que recalcula y actualiza el precio de venta de los
+     * productos relacionados a un proveedor en segundo plano.
+     */
+    public function updatePrecioVentaDeProductosRelacionados(int|string $proveedorId, int $nuevoPorcentajeUtilidad): void
+    {
+        $proveedor = $this->getById((int) $proveedorId);
+        if (! $proveedor) {
+            throw new NotFoundHttpException("Proveedor con ID {$proveedorId} no encontrado.");
+        }
+        ActualizarPrecioVentaProveedorJob::dispatch($proveedorId, $nuevoPorcentajeUtilidad);
     }
 
     public function delete(Proveedor $proveedor): bool

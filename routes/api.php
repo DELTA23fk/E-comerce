@@ -296,6 +296,10 @@ Route::prefix('v1')->group(function () {
                 Route::match(['put','patch'],'/{id}','update');
                 Route::delete('/{id}','destroy');
             });
+
+            //ACTUALIZACION DE PRECIOS DE VENTA EN SEGUNDO PLANO(POR PROVEEDOR Y SU PORCENTAJE DE UTILIDAD)
+            Route::post('proveedor/actualizar/utilidad-precio-venta-produtos', [ProviderController::class, 'actualizarPrecioVentaProveedor'])
+            ->name('proveedores.actualizar-precio-venta');
         });
 
         //vendedor
@@ -320,6 +324,8 @@ Route::prefix('v1')->group(function () {
             });
 
         });
+
+        
 
     });
 });
