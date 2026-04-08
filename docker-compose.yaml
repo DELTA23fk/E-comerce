@@ -13,7 +13,7 @@ services:
       - ./docker/php/php.ini:/usr/local/etc/php/conf.d/custom.ini
     environment:
       - APP_ENV=${APP_ENV:-local}
-      - APP_URL=${APP_URL:-http://localhost}
+      # - APP_URL=${APP_URL:-http://localhost}
     depends_on:
       mysql:
         condition: service_healthy
@@ -95,17 +95,18 @@ services:
   #
   # Sin cuenta: URL temporal que cambia al reiniciar.
   # Con cuenta gratuita + CLOUDFLARE_TOKEN: URL fija en tu dominio.
+  # ── Cloudflare Tunnel ──────────────────────────────────────────────────────
   cloudflared:
     image: cloudflare/cloudflared:latest
     container_name: nxtit_tunnel
     restart: unless-stopped
-    # Sin token → quick tunnel (URL aleatoria, caduca en 24h, suficiente para dev)
-    # Con token → tunnel persistente (ver README)
+    # Añadimos --protocol http2 para evitar los errores de 'control stream'
     command: >
       tunnel
+      --protocol http2
       ${CLOUDFLARE_TOKEN:+--token ${CLOUDFLARE_TOKEN}}
       ${CLOUDFLARE_TOKEN:+run}
-      ${CLOUDFLARE_TOKEN:-–url http://nginx:80}
+      ${CLOUDFLARE_TOKEN:---url http://nginx:80}
     environment:
       - TUNNEL_URL=http://nginx:80
     depends_on:
