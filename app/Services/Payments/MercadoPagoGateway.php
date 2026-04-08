@@ -36,14 +36,14 @@ class MercadoPagoGateway implements PaymentGatewayInterface
 
     private const STATUS_MAP = [
         'pending'      => 'pending',
-        'approved'     => 'approved',
-        'authorized'   => 'pending',
-        'in_process'   => 'pending',
-        'in_mediation' => 'in_mediation',
-        'rejected'     => 'rejected',
-        'cancelled'    => 'cancelled',
-        'refunded'     => 'refunded',
-        'charged_back' => 'charged_back',
+    'approved'     => 'approved',
+    'authorized'   => 'pending',
+    'in_process'   => 'in_process',
+    'in_mediation' => 'in_mediation',
+    'rejected'     => 'rejected',
+    'cancelled'    => 'cancelled',
+    'refunded'     => 'refunded',
+    'charged_back' => 'charged_back',
     ];
 
     public function __construct(
@@ -127,7 +127,8 @@ class MercadoPagoGateway implements PaymentGatewayInterface
             ];
         }
 
-        $baseUrl = config('app.url');
+        $baseUrl = config('app.frontend_url');
+        $backendUrl = config('app.url');
 
         return [
             'items'  => $items,
@@ -143,12 +144,12 @@ class MercadoPagoGateway implements PaymentGatewayInterface
                 ],
             ],
             'back_urls' => [
-                'success' => "{$baseUrl}/api/v1/pedidos/pagos/resultado?status=success&folio={$pedido->folio}",
-                'failure' => "{$baseUrl}/api/v1/pedidos/pagos/resultado?status=failure&folio={$pedido->folio}",
-                'pending' => "{$baseUrl}/api/v1/pedidos/pagos/resultado?status=pending&folio={$pedido->folio}",
+                'success' => "{$baseUrl}/dashboard",
+                'failure' => "{$baseUrl}/dashboard",
+                'pending' => "{$baseUrl}/dashboard",
             ],
-            'auto_return'          => 'approved',
-            'notification_url'     => "{$baseUrl}/webhooks/mercadopago",
+            // 'auto_return'          => 'approved',
+            'notification_url'     => "{$backendUrl}/api/v1/webhooks/mercadopago?source_news=webhooks",
             'external_reference'   => $pedido->folio,
             'statement_descriptor' => config('app.name', 'Todo para oficinas'),
             'expires'              => true,
@@ -192,8 +193,13 @@ class MercadoPagoGateway implements PaymentGatewayInterface
 
         $tipo = $payload['type'] ?? $payload['topic'] ?? '';
 
-        if (!in_array($tipo, ['payment', 'refund'], true)) {
-            Log::info('[MercadoPago] Webhook ignorado — tipo no relevante', ['type' => $tipo]);
+        // ✅ FIX: MP solo envía type='payment' para pagos Y reembolsos.
+        // 'refund' no existe como type independiente en webhooks de MP.
+        if ($tipo !== 'payment') {
+            Log::info('[MercadoPago] Webhook ignorado — tipo no relevante', [
+                'type'   => $tipo,
+                'action' => $payload['action'] ?? 'unknown',
+            ]);
 
             return new WebhookResultData(
                 tipoEvento:       'other',
@@ -212,10 +218,16 @@ class MercadoPagoGateway implements PaymentGatewayInterface
             throw new PaymentWebhookException(self::NOMBRE, 'No se encontró data.id en el payload.');
         }
 
-        // Consultar estado real con el SDK — no confiar solo en el payload del webhook
+        // Consultar estado real — nunca confiar solo en el payload del webhook
         try {
             $client  = new PaymentClient();
             $payment = $client->get((int) $paymentId);
+
+            Log::info('[MercadoPago] Pago consultado con SDK', [
+                'payment_id' => $paymentId,
+                'status'     => $payment->status     ?? 'unknown',
+                'action'     => $payload['action']   ?? 'unknown',
+            ]);
 
         } catch (MPApiException $e) {
             throw new PaymentGatewayException(
@@ -228,8 +240,13 @@ class MercadoPagoGateway implements PaymentGatewayInterface
 
         $statusData = $this->normalizarPayment($payment);
 
+        // ✅ FIX: reembolso se detecta por status normalizado o por $payment->refunds,
+        // NO por el campo 'type' del webhook (que siempre es 'payment')
+        $esReembolso = in_array($statusData->status, ['refunded', 'charged_back'], true)
+            || !empty($payment->refunds);
+
         return new WebhookResultData(
-            tipoEvento:       empty($payment->refunds) ? 'payment' : 'refund',
+            tipoEvento:       $esReembolso ? 'refund' : 'payment',
             status:           $statusData->status,
             gatewayPaymentId: $statusData->gatewayPaymentId,
             gatewayOrderId:   $statusData->gatewayOrderId,
@@ -240,45 +257,84 @@ class MercadoPagoGateway implements PaymentGatewayInterface
         );
     }
 
-    private function validarFirmaWebhook(array $payload, array $headers): void
-    {
-        // Sin secret configurado — omitir en sandbox, advertir en producción
-        if (empty($this->webhookSecret)) {
-            if (!$this->sandbox) {
-                Log::warning('[MercadoPago] MP_WEBHOOK_SECRET no configurado en producción.');
-            }
-            return;
+  private function validarFirmaWebhook(array $payload, array $headers): void
+{
+    if (empty($this->webhookSecret)) {
+        if (!$this->sandbox) {
+            Log::warning('[MercadoPago] MP_WEBHOOK_SECRET no configurado en producción.');
         }
+        return;
+    }
 
-        $xSignature = $headers['x-signature'] ?? $headers['X-Signature'] ?? null;
-        $xRequestId = $headers['x-request-id'] ?? $headers['X-Request-Id'] ?? null;
+    $xSignature = $headers['x-signature'] ?? null;
+    if (is_array($xSignature)) $xSignature = $xSignature[0] ?? null;
 
-        if (!$xSignature) {
-            throw new PaymentWebhookException(self::NOMBRE, 'Header x-signature ausente.');
-        }
+    $xRequestId = $headers['x-request-id'] ?? null;
+    if (is_array($xRequestId)) $xRequestId = $xRequestId[0] ?? null;
 
-        $parts = [];
-        foreach (explode(',', $xSignature) as $part) {
-            [$key, $value] = explode('=', $part, 2) + [null, null];
-            if ($key && $value) {
-                $parts[trim($key)] = trim($value);
-            }
-        }
+    if (!$xSignature) {
+        throw new PaymentWebhookException(self::NOMBRE, 'Header x-signature ausente.');
+    }
 
-        $ts = $parts['ts'] ?? null;
-        $v1 = $parts['v1'] ?? null;
+    $parts = [];
+    foreach (explode(',', $xSignature) as $part) {
+        [$key, $value] = explode('=', trim($part), 2) + [null, null];
+        if ($key && $value) $parts[trim($key)] = trim($value);
+    }
 
-        if (!$ts || !$v1) {
-            throw new PaymentWebhookException(self::NOMBRE, 'x-signature mal formateado.');
-        }
+    $ts = $parts['ts'] ?? null;
+    $v1 = $parts['v1'] ?? null;
 
-        $manifest = "id:{$payload['data']['id']};request-id:{$xRequestId};ts:{$ts};";
+    if (!$ts || !$v1) {
+        throw new PaymentWebhookException(self::NOMBRE, 'x-signature mal formateado.');
+    }
 
-        if (!hash_equals(hash_hmac('sha256', $manifest, $this->webhookSecret), $v1)) {
-            throw new PaymentWebhookException(self::NOMBRE, 'Firma del webhook no coincide.');
+    if (!$this->sandbox) {
+        $now       = (int) (microtime(true) * 1000);
+        $tolerance = 5 * 60 * 1000;
+
+        // IPN envía ts en segundos (10 dígitos), nuevo Webhook en milisegundos (13 dígitos)
+        $tsMs = strlen((string) $ts) <= 10
+            ? (int) $ts * 1000
+            : (int) $ts;
+
+        if (abs($now - $tsMs) > $tolerance) {
+            throw new PaymentWebhookException(self::NOMBRE, 'Webhook expirado (ts fuera de rango).');
         }
     }
 
+    // _data_id ya fue resuelto y normalizado en el controller
+    $dataId = $payload['_data_id'] ?? $payload['data.id'];
+
+    if (!$dataId) {
+        throw new PaymentWebhookException(self::NOMBRE, 'No se encontró data.id para validar firma.');
+    }
+
+    $manifest  = trim("id:{$dataId};request-id:{$xRequestId};ts:{$ts};");
+    $generated = hash_hmac('sha256', $manifest, $this->webhookSecret);
+
+    // Log::debug('[MercadoPago] Comparar firmas webhook', [
+    //     'v1'  => $v1,
+    //     'generated' => $generated,
+    // ]);
+
+    Log::debug('[MercadoPago] Validando firma webhook', [
+        'formato'    => $payload['_format'] ?? '?',
+        'manifest'   => $manifest,
+        'data_id'    => $dataId,
+        'request_id' => $xRequestId,
+        'ts'         => $ts,
+    ]);
+
+    if ($generated !== $v1) {
+        Log::warning('[MercadoPago] Firma inválida', [
+            'manifest'  => $manifest,
+            'generated' => substr($generated, 0, 8) . '...',
+            'received'  => substr($v1, 0, 8) . '...',
+        ]);
+        throw new PaymentWebhookException(self::NOMBRE, 'Firma del webhook no coincide.');
+    }
+}
     // =========================================================================
     // EMITIR REEMBOLSO
     // =========================================================================

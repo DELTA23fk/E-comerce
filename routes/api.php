@@ -9,7 +9,12 @@ use App\Http\Controllers\Api\V1\Collaborator\CollaboratorController;
 use App\Http\Controllers\Api\V1\FamilyController;
 use App\Http\Controllers\Api\V1\GroupController;
 use App\Http\Controllers\Api\V1\Orders\OrderController;
+use App\Http\Controllers\Api\V1\Pedidos\PedidosClienteController;
+use App\Http\Controllers\Api\V1\Pedidos\PedidosAdminController;
 use App\Http\Controllers\Api\V1\Payment\PagoController;
+use App\Http\Controllers\Api\V1\Pedidos\admin\AdminPedidoController;
+use App\Http\Controllers\Api\V1\Pedidos\admin\PedidoProveedorController;
+use App\Http\Controllers\Api\V1\Pedidos\client\ClientePedidoController;
 use App\Http\Controllers\Api\V1\Product\ProductCatalogController;
 use App\Http\Controllers\Api\V1\Product\ProductoController;
 use App\Http\Controllers\Api\V1\Product\ProductOfferController;
@@ -309,19 +314,58 @@ Route::prefix('v1')->group(function () {
             Route::get('/obtener/cliente/rfc','obtenerClientePorRfc');
         });
 
-        //COTIZAR PEDIDOS
+        //PEDIDOS - Rutas de cliente
+        Route::prefix('mis-pedidos')
+            ->controller(ClientePedidoController::class)
+            ->middleware('role:customer')
+            ->group(function(){
+               // Estadísticas personales — va antes de {id} para no colisionar
+                Route::get('estadisticas','estadisticas')
+                    ->name('estadisticas');
+    
+                // CRUD básico
+                Route::get('/', 'index');
+                Route::get('{id}', 'show');
+    
+                // Sub-recursos del pedido
+                Route::get('{id}/resumen',       'resumen')->name('resumen');
+                Route::get('{id}/seguimiento',   'seguimiento')->name('seguimiento');
+                Route::get('{id}/transacciones', 'transacciones')->name('transacciones');
+            });
+
+        //PEDIDOS - Rutas de administrador
+        Route::prefix('admin/pedidos')
+            ->middleware('role:admin')
+            ->group(function(){
+               // Rutas estáticas — van ANTES de {id} para evitar colisiones
+                Route::get('dashboard',          [AdminPedidoController::class, 'dashboard'])->name('dashboard');
+                Route::get('atencion-requerida', [AdminPedidoController::class, 'atencionRequerida'])->name('atencion-requerida');
+                Route::get('atascados',          [AdminPedidoController::class, 'atascados'])->name('atascados');
+                Route::get('tendencia',          [AdminPedidoController::class, 'tendencia'])->name('tendencia');
+                Route::get('top-clientes',       [AdminPedidoController::class, 'topClientes'])->name('top-clientes');
+                Route::get('/',    [AdminPedidoController::class, 'index'])->name('index');
+                Route::get('{id}', [AdminPedidoController::class, 'show'])->name('show');
+                // Actualización de estatus del pedido maestro
+                Route::patch('{id}/estatus', [AdminPedidoController::class, 'actualizarEstatus'])->name('estatus');
+
+                //PEDIDOS-PROVEEDORES - Rutas anidadas para gestión de pedidos proveedores
+                // Actualización masiva de fecha — antes de {id}
+                Route::patch('proveedor/fecha-entrega-masiva', [PedidoProveedorController::class, 'actualizarFechaMasiva'])
+                    ->name('fecha-masiva');
+    
+                // Actualización individual de un pedido proveedor
+                Route::patch('proveedor/{id}', [PedidoProveedorController::class, 'actualizar'])->name('actualizar');
+            });
+
+        //PEDIDOS - Rutas originales
         Route::prefix('pedidos')->group(function(){
             Route::post('cotizar/envios/productos',[OrderController::class,'cotizarEnvio']);
 
-            Route::prefix('pagos')->group(function(){
+            Route::post('/confirmar',[OrderController::class,'store'])->name('iniciar');
 
-                Route::post('/iniciar',[PagoController::class,'iniciar'])->name('iniciar');
+            Route::post('{pedido}/pagar',        [OrderController::class, 'iniciarPago']);
 
-                // Route::post('/iniciar-manual',[PagoController::class,'iniciarManual'])->name('iniciar-manual');
-
-                Route::get('/resultado',[PagoController::class,'resultado'])->name('resultado')->withoutMiddleware(['auth:sanctum']); // MP redirige sin sesión activa
-;
-            });
+            Route::post('{pedido}/reembolso',    [OrderController::class, 'reembolsar'])->middleware('role:admin');
 
         });
 
