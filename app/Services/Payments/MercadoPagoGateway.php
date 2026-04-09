@@ -149,7 +149,7 @@ class MercadoPagoGateway implements PaymentGatewayInterface
                 'pending' => "{$baseUrl}/dashboard",
             ],
             // 'auto_return'          => 'approved',
-            'notification_url'     => "{$backendUrl}/api/v1/webhooks/mercadopago?source_news=webhooks",
+            'notification_url'     => "{$backendUrl}/api/v1/webhooks/mercadopago",
             'external_reference'   => $pedido->folio,
             'statement_descriptor' => config('app.name', 'Todo para oficinas'),
             'expires'              => true,
@@ -212,7 +212,7 @@ class MercadoPagoGateway implements PaymentGatewayInterface
             );
         }
 
-        $paymentId = (string) ($payload['data']['id'] ?? $payload['id'] ?? '');
+        $paymentId = (string) ($payload['data']['id'] ?? $payload['id'] ?? $payload['data.id'] ?? $payload['_data_id'] ?? '');
 
         if (empty($paymentId)) {
             throw new PaymentWebhookException(self::NOMBRE, 'No se encontró data.id en el payload.');
@@ -259,6 +259,15 @@ class MercadoPagoGateway implements PaymentGatewayInterface
 
   private function validarFirmaWebhook(array $payload, array $headers): void
 {
+    // IPN legacy no trae x-signature, se omite validación
+    if (($payload['_format'] ?? null) === 'ipn') {
+        Log::info('[MercadoPago] Notificación IPN legacy, omitiendo validación de firma', [
+            'topic'    => $payload['topic'] ?? null,
+            'resource' => $payload['resource'] ?? null,
+        ]);
+        return;
+    }
+
     if (empty($this->webhookSecret)) {
         if (!$this->sandbox) {
             Log::warning('[MercadoPago] MP_WEBHOOK_SECRET no configurado en producción.');
@@ -266,6 +275,7 @@ class MercadoPagoGateway implements PaymentGatewayInterface
         return;
     }
 
+    // Headers llegan como arrays desde $request->headers->all()
     $xSignature = $headers['x-signature'] ?? null;
     if (is_array($xSignature)) $xSignature = $xSignature[0] ?? null;
 
@@ -276,6 +286,7 @@ class MercadoPagoGateway implements PaymentGatewayInterface
         throw new PaymentWebhookException(self::NOMBRE, 'Header x-signature ausente.');
     }
 
+    // Parsear ts y v1 del header x-signature
     $parts = [];
     foreach (explode(',', $xSignature) as $part) {
         [$key, $value] = explode('=', trim($part), 2) + [null, null];
@@ -289,34 +300,42 @@ class MercadoPagoGateway implements PaymentGatewayInterface
         throw new PaymentWebhookException(self::NOMBRE, 'x-signature mal formateado.');
     }
 
+    // Solo validar timestamp en producción
+    // En sandbox MP puede enviar timestamps antiguos en notificaciones de prueba
     if (!$this->sandbox) {
         $now       = (int) (microtime(true) * 1000);
         $tolerance = 5 * 60 * 1000;
 
-        // IPN envía ts en segundos (10 dígitos), nuevo Webhook en milisegundos (13 dígitos)
+        // Nuevo Webhook: ts en ms (13 dígitos) — IPN legacy: ts en segundos (10 dígitos)
         $tsMs = strlen((string) $ts) <= 10
             ? (int) $ts * 1000
             : (int) $ts;
+
+        Log::debug('[MercadoPago] Timestamp debug', [
+            'ts_recibido'   => $ts,
+            'ts_ms'         => $tsMs,
+            'ts_now'        => $now,
+            'diferencia_ms' => abs($now - $tsMs),
+            'tolerancia_ms' => $tolerance,
+        ]);
 
         if (abs($now - $tsMs) > $tolerance) {
             throw new PaymentWebhookException(self::NOMBRE, 'Webhook expirado (ts fuera de rango).');
         }
     }
 
-    // _data_id ya fue resuelto y normalizado en el controller
-    $dataId = $payload['_data_id'] ?? $payload['data.id'];
+    // ✅ _data_id es la referencia canónica resuelta en el controller
+    $dataId = (string) ($payload['_data_id'] ?? '');
 
     if (!$dataId) {
+        Log::warning('[MercadoPago] No se encontró _data_id', [
+            'payload_keys' => array_keys($payload),
+        ]);
         throw new PaymentWebhookException(self::NOMBRE, 'No se encontró data.id para validar firma.');
     }
 
-    $manifest  = trim("id:{$dataId};request-id:{$xRequestId};ts:{$ts};");
+    $manifest  = "id:{$dataId};request-id:{$xRequestId};ts:{$ts};";
     $generated = hash_hmac('sha256', $manifest, $this->webhookSecret);
-
-    // Log::debug('[MercadoPago] Comparar firmas webhook', [
-    //     'v1'  => $v1,
-    //     'generated' => $generated,
-    // ]);
 
     Log::debug('[MercadoPago] Validando firma webhook', [
         'formato'    => $payload['_format'] ?? '?',
@@ -326,7 +345,8 @@ class MercadoPagoGateway implements PaymentGatewayInterface
         'ts'         => $ts,
     ]);
 
-    if ($generated !== $v1) {
+    // ✅ hash_equals previene timing attacks
+    if (!hash_equals($generated, $v1)) {
         Log::warning('[MercadoPago] Firma inválida', [
             'manifest'  => $manifest,
             'generated' => substr($generated, 0, 8) . '...',
@@ -334,6 +354,7 @@ class MercadoPagoGateway implements PaymentGatewayInterface
         ]);
         throw new PaymentWebhookException(self::NOMBRE, 'Firma del webhook no coincide.');
     }
+    return;
 }
     // =========================================================================
     // EMITIR REEMBOLSO
